@@ -43,3 +43,13 @@ type OpenIDProviderMetadata struct {
 	OPPolicyURI                                string   `json:"op_policy_uri,omitempty"`
 	OPTosURI                                   string   `json:"op_tos_uri,omitempty"`
 }
+
+// OpenIDTokenResponse is the response from the OpenID Provider when exchanging
+// an authorization code for an ID Token.
+type OpenIDTokenResponse struct {
+	IDToken      string `json:"id_token"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+}

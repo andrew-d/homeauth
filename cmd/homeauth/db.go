@@ -114,8 +114,6 @@ func (db *DB) getUserLocked(email string) (*DBUser, error) {
 	if db.closed {
 		return nil, os.ErrClosed
 	}
-
-	// Look up the user in the database.
 	user, ok := db.data.Users[email]
 	if !ok {
 		return nil, nil

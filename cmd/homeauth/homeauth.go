@@ -15,13 +15,16 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	flag "github.com/spf13/pflag"
 
 	"github.com/andrew-d/homeauth/pwhash"
@@ -107,6 +110,7 @@ type idpServer struct {
 	signingKeyOnce sync.Once
 	signingKey     *rsa.PrivateKey
 	signingKeyID   uint64
+	signer         jose.Signer
 }
 
 type idpSession struct {
@@ -120,6 +124,8 @@ func (s *idpServer) httpHandler() http.Handler {
 	r.Get("/.well-known/jwks.json", s.serveJWKS)
 	r.Get("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
 	r.Get("/userinfo", s.serveUserinfo)
+
+	r.Get("/authorize/public", s.serveAuthorize)
 	r.Post("/token", s.serveToken)
 
 	r.Get("/login", s.serveGetLogin)
@@ -200,6 +206,21 @@ func (s *idpServer) getJWKS() (keyID uint64, pkey *rsa.PrivateKey, err error) {
 		}
 
 		s.logger.Info("generated new RSA key", "keyID", s.signingKeyID)
+
+		s.signer, err = jose.NewSigner(jose.SigningKey{
+			Algorithm: jose.RS256,
+			Key:       s.signingKey,
+		}, &jose.SignerOptions{
+			EmbedJWK: false,
+			ExtraHeaders: map[jose.HeaderKey]any{
+				jose.HeaderType: "JWT",
+				"kid":           fmt.Sprint(s.signingKeyID),
+			},
+		})
+		if err != nil {
+			s.logger.Error("failed to create signer", errAttr(err))
+			return
+		}
 	})
 	return s.signingKeyID, s.signingKey, err
 }
@@ -238,6 +259,198 @@ func (s *idpServer) serveUserinfo(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not implemented", http.StatusNotImplemented)
 }
 
+func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
+	// This endpoint is visited by the user that is being authenticated;
+	// they're redirected here by the service they're trying to
+	// authenticate to (the "relying party" / RP).
+
+	// First, validate the request, per the OIDC spec § 3.1.2.2
+	// ("Authentication Request Validation").
+
+	// "1. The Authorization Server MUST validate all the OAuth 2.0
+	// parameters according to the OAuth 2.0 specification."
+	//
+	// The OAuth 2.0 specification is RFC6749, and § 4.1.1 states that the
+	// "response_type" and "client_id" parameters are REQUIRED, the
+	// "redirect_uri" parameter is OPTIONAL, the "scope" parameter is
+	// OPTIONAL, and the "state" parameter is RECOMMENDED.
+	responseType := r.URL.Query().Get("response_type")
+	clientID := r.URL.Query().Get("client_id")
+	if responseType == "" || clientID == "" {
+		http.Error(w, "missing response_type or client_id", http.StatusBadRequest)
+		return
+	}
+
+	// Per RFC6749 § 3.1.2:
+	//
+	//	The redirection endpoint URI MUST be an absolute URI as defined
+	//	by [RFC3986] Section 4.3.  The endpoint URI MAY include an
+	//	"application/x-www-form-urlencoded" formatted (per Appendix B)
+	//	query component ([RFC3986] Section 3.4), which MUST be retained
+	//	when adding additional query parameters.  The endpoint URI MUST
+	//	NOT include a fragment component.
+	var redirectURI *url.URL
+	if uri := r.URL.Query().Get("redirect_uri"); uri != "" {
+		var err error
+		redirectURI, err = url.ParseRequestURI(uri)
+		if err != nil {
+			http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+			return
+		}
+		if err := validateRedirectURI(redirectURI); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// TODO: should we require the 'state' parameter, to defend against
+	// poorly-implemented RPs?
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		s.logger.Warn("missing state parameter in authorization request", "redirect_uri", redirectURI)
+	}
+
+	// "2. Verify that a scope parameter is present and contains the openid
+	// scope value [...]"
+	scopes := strings.Split(r.URL.Query().Get("scope"), " ")
+	if !slices.Contains(scopes, "openid") {
+		http.Error(w, "missing openid scope", http.StatusBadRequest)
+		return
+	}
+
+	// "3. The Authorization Server MUST verify that all the REQUIRED
+	// parameters are present and their usage conforms to this
+	// specification."
+	// TODO
+
+	// "4. If the sub (subject) Claim is requested with a specific value
+	// for the ID Token, the Authorization Server MUST only send a positive
+	// response if the End-User identified by that sub value has an active
+	// session with the Authorization Server or has been Authenticated as a
+	// result of the request. The Authorization Server MUST NOT reply with
+	// an ID Token or Access Token for a different user, even if they have
+	// an active session with the Authorization Server. Such a request can
+	// be made either using an id_token_hint parameter or by requesting a
+	// specific Claim Value as described in Section 5.5.1, if the claims
+	// parameter is supported by the implementation."
+	//
+	// In other words: if the RP requests that we only authorize a specific
+	// user, we should verify that the currently-authenticated user
+	// matches.
+	//
+	// We don't set "claims_parameter_supported", so we only need to check
+	// for the "id_token_hint" parameter.
+	idTokenHint := r.URL.Query().Get("id_token_hint")
+	if idTokenHint != "" {
+		// "5. When an id_token_hint is present, the OP MUST validate
+		// that it was the issuer of the ID Token. The OP SHOULD accept
+		// ID Tokens when the RP identified by the ID Token has a
+		// current session or had a recent session at the OP, even when
+		// the exp time has passed."
+
+		// TODO: implement me
+		http.Error(w, "id_token_hint not implemented", http.StatusNotImplemented)
+		return
+	}
+
+	// Okay, we successfully validated the request parameters. Now, see if
+	// we have an active session.
+	session, ok := s.ss.Get(r)
+
+	// Per the OIDC spec § 3.1.2.3:
+	//
+	//	The Authorization Server MUST NOT interact with the End-User in the following case:
+	//
+	//	The Authentication Request contains the prompt parameter with
+	//	the value none. In this case, the Authorization Server MUST
+	//	return an error if an End-User is not already Authenticated or
+	//	could not be silently Authenticated.
+	prompt := r.URL.Query().Get("prompt")
+	if !ok && prompt == "none" {
+		redirectWithError(w, r, redirectURI, "login_required", "user not authenticated", state)
+		return
+	}
+	if prompt == "login" {
+		http.Error(w, "prompt=login not implemented", http.StatusNotImplemented)
+		return
+	}
+
+	// Okay, if we don't have a session, redirect the user to login and
+	// return them to this flow after they've done that.
+	if !ok {
+		s.logger.Debug("no session; redirecting to login")
+		s.redirectToLogin(w, r)
+		return
+	}
+
+	// Okay, now that we've successfully authenticated a user, we need to
+	// figure out what to reply to the RP with. Switch based on the
+	// "response_type" parameter.
+	//
+	// This switch case updates the redirectURI URL to indicate what to
+	// redirect to.
+	switch responseType {
+	case "code":
+		code := randHex(16)
+		// TODO: store code in DB
+		s.logger.Info("generated code", "code", code, "user", session.Email)
+
+		// Redirect the user back to the RP with the code.
+		vals := redirectURI.Query()
+		vals.Set("code", code)
+		if state != "" {
+			vals.Set("state", state)
+		}
+		redirectURI.RawQuery = vals.Encode()
+
+	default:
+		http.Error(w, "unsupported response_type", http.StatusNotImplemented)
+		return
+	}
+
+	http.Redirect(w, r, redirectURI.String(), http.StatusSeeOther)
+}
+
+func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI *url.URL, err, desc, state string) {
+	if redirectURI == nil {
+		http.Error(w, "missing redirect_uri; cannot return error", http.StatusBadRequest)
+		return
+	}
+
+	// Copy the redirect URL so we can change the query parameters.
+	vals := redirectURI.Query()
+	vals.Set("error", err)
+	if desc != "" {
+		vals.Set("error_description", desc)
+	}
+	if state != "" {
+		vals.Set("state", state)
+	}
+
+	redirectURI = cloneURL(redirectURI)
+	redirectURI.RawQuery = vals.Encode()
+
+	http.Redirect(w, r, redirectURI.String(), http.StatusSeeOther)
+}
+
+func cloneURL(u *url.URL) *url.URL {
+	clone := *u
+	return &clone
+}
+
+func validateRedirectURI(ru *url.URL) error {
+	if !ru.IsAbs() {
+		return fmt.Errorf("redirect_uri must be an absolute URI")
+	}
+	if ru.Fragment != "" {
+		return fmt.Errorf("redirect_uri must not include a fragment")
+	}
+	if ru.Scheme != "http" && ru.Scheme != "https" {
+		return fmt.Errorf("redirect_uri must be http or https")
+	}
+	return nil
+}
+
 func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 	// Double-check that this is a POST request
 	if r.Method != http.MethodPost {
@@ -256,20 +469,79 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
+
+	// TODO: load the code from our DB somewhere
+	// TODO: verify the code hasn't expired
+	// TODO: verify that the relying party is allowed to make this request
+	// TODO: verify that the redirect URI matches the one used in the auth request
+
+	// Construct the claims that we're signing for this response.
+	now := time.Now()
+	claims := jwt.Claims{
+		ID:        randHex(32),
+		Issuer:    s.serverURL,
+		Subject:   "TODO",
+		IssuedAt:  jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now.Add(-10 * time.Second)), // grace period for clock skew
+		Expiry:    jwt.NewNumericDate(now.Add(5 * time.Minute)),
+		Audience:  jwt.Audience{"TODO-client-id-here"},
+	}
+
+	s.getJWKS() // TODO: using for side effect, which I don't love
+	signer := s.signer
+
+	// Sign the claims with our private key.
+	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		s.logger.Error("failed to sign token", errAttr(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	at := randHex(32)
+	resp := OpenIDTokenResponse{
+		IDToken:     token,
+		AccessToken: at,
+		TokenType:   "Bearer",
+		ExpiresIn:   5 * 60, // 5 minutes
+		// TODO: refresh token?
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// From the OIDC spec § 3.1.3.3:
+	//
+	//	All Token Responses that contain tokens, secrets, or other
+	//	sensitive information MUST include the following HTTP response
+	//	header fields and values:
+	w.Header().Set("Cache-Control", "no-store")
+
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.logger.Error("failed to encode token response", errAttr(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
-func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
-	const page = `<html>
+var loginTemplate = template.Must(template.New("login").Parse(`<html>
 	<head></head>
 	<body>
-		<form action="/login" method="post">
-			<input type="text" name="username">
+		<form action="/login?next={{.Next}}" method="POST">
+			<input type="text" name="username" placeholder="username">
 			<input type="password" name="password">
 			<input type="submit" value="Login">
 		</form>
 	</body>
-	</html>`
-	w.Write([]byte(page))
+	</html>
+`))
+
+func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
+	if err := loginTemplate.Execute(w, map[string]any{
+		"Next": r.URL.Query().Get("next"),
+	}); err != nil {
+		s.logger.Error("failed to render login template", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}
 }
 
 func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +579,8 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		// Validate that the URL is relative and not an open redirect.
 		if u, err := url.Parse(next); err == nil && !u.IsAbs() {
 			nextURL = next
+		} else {
+			s.logger.Warn("invalid next URL", "next", next, errAttr(err), "is_abs", u.IsAbs())
 		}
 	}
 
@@ -325,6 +599,12 @@ func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 	session := s.ss.MustFromContext(r.Context())
 
 	fmt.Fprintf(w, "<html><body><h1>Welcome, %s!</h1></body></html>", template.HTMLEscapeString(session.Email))
+}
+
+func randHex(n int) string {
+	buf := make([]byte, n)
+	rand.Read(buf)
+	return fmt.Sprintf("%x", buf)
 }
 
 func fatal(logger *slog.Logger, msg string, args ...any) {
