@@ -7,10 +7,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -18,8 +20,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
 	flag "github.com/spf13/pflag"
+
+	"github.com/andrew-d/homeauth/session"
 )
 
 var (
@@ -31,9 +36,12 @@ func main() {
 	flag.Parse()
 	logger := slog.Default()
 
+	ss := session.New[*idpSession]("homeauth", 7*24*time.Hour)
+
 	idp := &idpServer{
 		logger:    logger.With(slog.String("service", "idp")),
 		serverURL: *serverURL,
+		ss:        ss,
 	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
@@ -46,7 +54,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *port),
-		Handler: idp.mux(),
+		Handler: idp.httpHandler(),
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -81,18 +89,44 @@ func main() {
 type idpServer struct {
 	logger    *slog.Logger
 	serverURL string
+	ss        *session.Store[*idpSession]
 
 	signingKeyOnce sync.Once
 	signingKey     *rsa.PrivateKey
 	signingKeyID   uint64
 }
 
-func (s *idpServer) mux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.serveIndex)
-	mux.HandleFunc("/.well-known/jwks.json", s.serveJWKS)
-	mux.HandleFunc("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
-	return mux
+type idpSession struct {
+	Email string
+}
+
+func (s *idpServer) httpHandler() http.Handler {
+	r := chi.NewRouter()
+	// TODO: request logger
+	r.Get("/", s.serveIndex)
+	r.Get("/.well-known/jwks.json", s.serveJWKS)
+	r.Get("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
+	r.Get("/userinfo", s.serveUserinfo)
+
+	r.Get("/login", s.serveGetLogin)
+	r.Post("/login", s.servePostLogin)
+
+	// Authenticated endpoints
+	r.Group(func(r chi.Router) {
+		r.Use(s.ss.LoadContextWithHandler(http.HandlerFunc(s.redirectToLogin)))
+
+		r.Get("/account", s.serveAccount)
+	})
+
+	return r
+}
+
+func (s *idpServer) redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	// Construct a login URL with the current URL as the redirect.
+	vals := url.Values{}
+	vals.Set("next", r.URL.String())
+
+	http.Redirect(w, r, "/login?"+vals.Encode(), http.StatusSeeOther)
 }
 
 func (s *idpServer) serveIndex(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +217,60 @@ func (s *idpServer) serveOpenIDConfiguration(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "failed to encode metadata", http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *idpServer) serveUserinfo(w http.ResponseWriter, r *http.Request) {
+	// TODO
+	http.Error(w, "not implemented", http.StatusNotImplemented)
+}
+
+func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
+	const page = `<html>
+	<head></head>
+	<body>
+		<form action="/login" method="post">
+			<input type="text" name="username">
+			<input type="password" name="password">
+			<input type="submit" value="Login">
+		</form>
+	</body>
+	</html>`
+	w.Write([]byte(page))
+}
+
+func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+
+	// TODO: check password somewhere persistent
+	if username != "admin" || password != "admin" {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	// Log the user in by creating a session.
+	session := &idpSession{
+		Email: "fake@example.com",
+	}
+	s.ss.Put(w, r, session)
+
+	// Redirect the user to the 'next' parameter, or the account page if
+	// there's none provided or it's invalid.
+	var nextURL string = "/account"
+	if next := r.FormValue("next"); next != "" {
+		// Validate that the URL is relative and not an open redirect.
+		if u, err := url.Parse(next); err == nil && !u.IsAbs() {
+			nextURL = next
+		}
+	}
+
+	http.Redirect(w, r, nextURL, http.StatusSeeOther)
+}
+
+func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
+	session := s.ss.MustFromContext(r.Context())
+
+	fmt.Fprintf(w, "<html><body><h1>Welcome, %s!</h1></body></html>", template.HTMLEscapeString(session.Email))
 }
 
 func fatal(logger *slog.Logger, msg string, args ...any) {
