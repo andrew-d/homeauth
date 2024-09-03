@@ -24,24 +24,35 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	flag "github.com/spf13/pflag"
 
+	"github.com/andrew-d/homeauth/pwhash"
 	"github.com/andrew-d/homeauth/session"
 )
 
 var (
 	port      = flag.IntP("port", "p", 8080, "Port to listen on")
 	serverURL = flag.String("server-url", fmt.Sprintf("http://localhost:%d", *port), "Public URL of the server")
+	db        = flag.String("db", "homeauth.json", "Path to the database file")
 )
 
 func main() {
 	flag.Parse()
 	logger := slog.Default()
 
-	ss := session.New[*idpSession]("homeauth", 7*24*time.Hour)
+	db, err := NewDB(*db)
+	if err != nil {
+		fatal(logger, "failed to open database", "path", *db, errAttr(err))
+	}
+	defer db.Close()
 
+	hasher := pwhash.New(2, 512*1024, 2)
+
+	ss := session.New[*idpSession]("homeauth", 7*24*time.Hour)
 	idp := &idpServer{
 		logger:    logger.With(slog.String("service", "idp")),
 		serverURL: *serverURL,
 		ss:        ss,
+		db:        db,
+		hasher:    hasher,
 	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
@@ -90,6 +101,8 @@ type idpServer struct {
 	logger    *slog.Logger
 	serverURL string
 	ss        *session.Store[*idpSession]
+	db        *DB
+	hasher    *pwhash.Hasher
 
 	signingKeyOnce sync.Once
 	signingKey     *rsa.PrivateKey
@@ -107,6 +120,7 @@ func (s *idpServer) httpHandler() http.Handler {
 	r.Get("/.well-known/jwks.json", s.serveJWKS)
 	r.Get("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
 	r.Get("/userinfo", s.serveUserinfo)
+	r.Post("/token", s.serveToken)
 
 	r.Get("/login", s.serveGetLogin)
 	r.Post("/login", s.servePostLogin)
@@ -224,6 +238,26 @@ func (s *idpServer) serveUserinfo(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not implemented", http.StatusNotImplemented)
 }
 
+func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
+	// Double-check that this is a POST request
+	if r.Method != http.MethodPost {
+		http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if gt := r.FormValue("grant_type"); gt != "authorization_code" {
+		s.logger.Error("unsupported grant type", "grant_type", gt)
+		http.Error(w, "unsupported grant type", http.StatusBadRequest)
+		return
+	}
+
+	code := r.FormValue("code")
+	if code == "" {
+		http.Error(w, "missing code", http.StatusBadRequest)
+		return
+	}
+}
+
 func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
 	const page = `<html>
 	<head></head>
@@ -242,15 +276,27 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 
-	// TODO: check password somewhere persistent
-	if username != "admin" || password != "admin" {
+	// Load the user's password hash
+	user, err := s.db.GetUser(username)
+	if err != nil {
+		s.logger.Info("error getting user", "username", username)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	} else if user == nil {
+		s.logger.Info("no such user", "username", username)
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	if !s.hasher.Verify([]byte(password), []byte(user.PasswordHash)) {
+		s.logger.Info("invalid password for user", "username", username)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
 	// Log the user in by creating a session.
 	session := &idpSession{
-		Email: "fake@example.com",
+		Email: user.Email,
 	}
 	s.ss.Put(w, r, session)
 
@@ -265,6 +311,14 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, nextURL, http.StatusSeeOther)
+}
+
+func (s *idpServer) addUser(email, password string) error {
+	hash := s.hasher.HashString(password)
+	return s.db.PutUser(&DBUser{
+		Email:        email,
+		PasswordHash: hash,
+	})
 }
 
 func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
