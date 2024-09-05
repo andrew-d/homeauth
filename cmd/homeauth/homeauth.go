@@ -29,6 +29,7 @@ import (
 
 	"github.com/andrew-d/homeauth/pwhash"
 	"github.com/andrew-d/homeauth/session"
+	"github.com/andrew-d/homeauth/static"
 )
 
 var (
@@ -119,15 +120,21 @@ type idpSession struct {
 
 func (s *idpServer) httpHandler() http.Handler {
 	r := chi.NewRouter()
-	// TODO: request logger
+	// TODO: request logger middleware
+
 	r.Get("/", s.serveIndex)
 	r.Get("/.well-known/jwks.json", s.serveJWKS)
 	r.Get("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
-	r.Get("/userinfo", s.serveUserinfo)
+	// TODO: webfinger for Tailscale compat?
 
+	// OIDC IdP endpoints
 	r.Get("/authorize/public", s.serveAuthorize)
 	r.Post("/token", s.serveToken)
+	r.Get("/userinfo", s.serveUserinfo)
 
+	// TODO: OIDC RP endpoints
+
+	// Login endpoints for this application
 	r.Get("/login", s.serveGetLogin)
 	r.Post("/login", s.servePostLogin)
 
@@ -137,6 +144,14 @@ func (s *idpServer) httpHandler() http.Handler {
 
 		r.Get("/account", s.serveAccount)
 	})
+
+	// Add static assets
+	if err := static.Iter(func(path string, handler http.Handler) {
+		s.logger.Debug("serving static asset", "path", "/"+path)
+		r.Method(http.MethodGet, "/"+path, handler)
+	}); err != nil {
+		s.logger.Warn("failed to add static assets", errAttr(err))
+	}
 
 	return r
 }
