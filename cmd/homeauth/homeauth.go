@@ -36,11 +36,16 @@ var (
 	port      = flag.IntP("port", "p", 8080, "Port to listen on")
 	serverURL = flag.String("server-url", fmt.Sprintf("http://localhost:%d", *port), "Public URL of the server")
 	db        = flag.String("db", "homeauth.json", "Path to the database file")
+	verbose   = flag.BoolP("verbose", "v", false, "Enable verbose logging")
 )
 
 func main() {
 	flag.Parse()
 	logger := slog.Default()
+
+	if *verbose {
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
 
 	db, err := NewDB(*db)
 	if err != nil {
