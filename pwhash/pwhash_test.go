@@ -9,6 +9,8 @@ func TestPasswordHash(t *testing.T) {
 	if !h.Verify(password, hash) {
 		t.Error("password does not match hash")
 	}
+
+	t.Logf("hash of %q = %q", password, hash)
 }
 
 func TestVerifyWithDifferentParams(t *testing.T) {

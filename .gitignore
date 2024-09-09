@@ -1,5 +1,5 @@
-# The JSON "database"
-/homeauth.json
+# The database
+/homeauth.db*
 
 # Secrets
 /client_secret*.json

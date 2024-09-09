@@ -27,6 +27,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	flag "github.com/spf13/pflag"
 
+	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/pwhash"
 	"github.com/andrew-d/homeauth/session"
 	"github.com/andrew-d/homeauth/static"
@@ -35,7 +36,7 @@ import (
 var (
 	port      = flag.IntP("port", "p", 8080, "Port to listen on")
 	serverURL = flag.String("server-url", fmt.Sprintf("http://localhost:%d", *port), "Public URL of the server")
-	db        = flag.String("db", "homeauth.json", "Path to the database file")
+	dbPath    = flag.String("db", "homeauth.db", "Path to the database file")
 	verbose   = flag.BoolP("verbose", "v", false, "Enable verbose logging")
 )
 
@@ -47,9 +48,9 @@ func main() {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 
-	db, err := NewDB(*db)
+	db, err := db.NewDB(logger.With("component", "db"), *dbPath)
 	if err != nil {
-		fatal(logger, "failed to open database", "path", *db, errAttr(err))
+		fatal(logger, "failed to open database", "path", *dbPath, errAttr(err))
 	}
 	defer db.Close()
 
@@ -110,7 +111,7 @@ type idpServer struct {
 	logger    *slog.Logger
 	serverURL string
 	ss        *session.Store[*idpSession]
-	db        *DB
+	db        *db.DB
 	hasher    *pwhash.Hasher
 
 	signingKeyOnce sync.Once
@@ -569,7 +570,16 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 
 	// Load the user's password hash
-	user, err := s.db.GetUser(username)
+	ctx := r.Context()
+	tx, err := s.db.ReadTx(ctx)
+	if err != nil {
+		s.logger.Error("failed to start read transaction", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	user, err := tx.GetUser(ctx, username)
 	if err != nil {
 		s.logger.Info("error getting user", "username", username)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -607,9 +617,9 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, nextURL, http.StatusSeeOther)
 }
 
-func (s *idpServer) addUser(email, password string) error {
+func (s *idpServer) addUser(ctx context.Context, tx *db.Tx, email, password string) error {
 	hash := s.hasher.HashString(password)
-	return s.db.PutUser(&DBUser{
+	return tx.PutUser(ctx, &db.User{
 		Email:        email,
 		PasswordHash: hash,
 	})
