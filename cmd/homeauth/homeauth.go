@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -170,9 +169,26 @@ func (s *idpServer) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login?"+vals.Encode(), http.StatusSeeOther)
 }
 
+var homeTemplate = template.Must(template.New("home").Parse(`<html>
+	<head>
+		<title>IDP Home</title>
+		<link rel="stylesheet" href="/css/min.css">
+	</head>
+	<body>
+		<div class="container" style="margin-top: 1em">
+			<h1>IDP Home</h1>
+			<ul>
+				<li><a href="/login">Login</a></li>
+				<li><a href="/account">Account</a></li>
+			</ul>
+		</div>
+	</body>
+	</html>
+`))
+
 func (s *idpServer) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
-		io.WriteString(w, "<html><body><h1>IDP Home</h1></body></html>")
+		homeTemplate.Execute(w, nil)
 		return
 	}
 
@@ -545,13 +561,19 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 }
 
 var loginTemplate = template.Must(template.New("login").Parse(`<html>
-	<head></head>
+	<head>
+		<title>Login</title>
+		<link rel="stylesheet" href="/css/min.css">
+	</head>
 	<body>
-		<form action="/login?next={{.Next}}" method="POST">
-			<input type="text" name="username" placeholder="username">
-			<input type="password" name="password">
-			<input type="submit" value="Login">
-		</form>
+		<div class="container" style="margin-top: 1em">
+			<h1>Login</h1>
+			<form action="/login?next={{.Next}}" method="POST">
+				<input type="text" class="smooth" name="username" placeholder="username">
+				<input type="password" class="smooth" name="password" placeholder="password">
+				<input type="submit" class="btn btn-b btn-sm smooth" value="Login">
+			</form>
+		</div>
 	</body>
 	</html>
 `))
@@ -625,10 +647,34 @@ func (s *idpServer) addUser(ctx context.Context, tx *db.Tx, email, password stri
 	})
 }
 
+var accountTemplate = template.Must(template.New("account").Parse(`<html>
+	<head>
+		<title>Account</title>
+		<link rel="stylesheet" href="/css/min.css">
+	</head>
+	<body>
+		<div class="container" style="margin-top: 1em">
+			<h1>Your Account</h1>
+			<table class="table">
+				<tr style="background: transparent">
+					<th style="background: #ddd">Email</th>
+					<td style="background: transparent">{{ .Session.Email }}</td>
+				</tr>
+			</table>
+		</div>
+	</body>
+	</html>
+`))
+
 func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 	session := s.ss.MustFromContext(r.Context())
 
-	fmt.Fprintf(w, "<html><body><h1>Welcome, %s!</h1></body></html>", template.HTMLEscapeString(session.Email))
+	if err := accountTemplate.Execute(w, map[string]any{
+		"Session": session,
+	}); err != nil {
+		s.logger.Error("failed to render account template", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}
 }
 
 func randHex(n int) string {
