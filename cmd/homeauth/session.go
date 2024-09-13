@@ -12,18 +12,14 @@ const sessionCookieName = "session"
 var sessionCtxKey = new(int)
 
 // getSession will retrieve a session from the request, if it exists.
-func (s *idpServer) getSession(r *http.Request, tx *db.Tx) (*db.Session, bool) {
+func (s *idpServer) getSession(data *data, r *http.Request) (*db.Session, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
 		return nil, false
 	}
 
-	ctx := r.Context()
-	session, err := tx.GetSessionByID(ctx, cookie.Value)
-	if err != nil {
-		return nil, false
-	}
-	return session, true
+	sess, ok := data.Sessions[cookie.Value]
+	return sess, ok
 }
 
 // requireSession is a middleware that looks up a session from the provided
@@ -34,14 +30,13 @@ func (s *idpServer) getSession(r *http.Request, tx *db.Tx) (*db.Session, bool) {
 func (s *idpServer) requireSession(errHandler http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			rx, err := s.db.ReadTx(r.Context())
-			if err != nil {
-				s.logger.Error("failed to open read transaction", errAttr(err))
-				errHandler.ServeHTTP(w, r)
-				return
-			}
-
-			session, ok := s.getSession(r, rx)
+			var (
+				session *db.Session
+				ok      bool
+			)
+			s.db.Read(func(d *data) {
+				session, ok = s.getSession(d, r)
+			})
 			if !ok {
 				s.logger.Debug("no session found")
 				errHandler.ServeHTTP(w, r)
@@ -60,29 +55,26 @@ func (s *idpServer) sessionFromContext(ctx context.Context) (*db.Session, bool) 
 	return session, ok
 }
 
-// mustSessionFromContext retrieves a session from the provided context, or
-// panics if it does not exist.
-func (s *idpServer) mustSessionFromContext(ctx context.Context) *db.Session {
-	session, ok := s.sessionFromContext(ctx)
-	if !ok {
-		panic("session not found in context")
-	}
-	return session
-}
-
-// mustUserFromContext retrieves a user from the provided context based on the
-// stored session.
+// userFromContext retrieves a user from the provided context based on the
+// stored session. It assumes that there's a valid session in the context, as
+// would be stored with requireSession; if not, it will panic.
 func (s *idpServer) mustUserFromContext(ctx context.Context) *db.User {
-	session := s.mustSessionFromContext(ctx)
+	var user *db.User
+	s.db.Read(func(d *data) {
+		session, ok := s.sessionFromContext(ctx)
+		if !ok {
+			return
+		}
 
-	rx, err := s.db.ReadTx(ctx)
-	if err != nil {
-		panic(err)
-	}
-
-	user, err := rx.GetUser(ctx, session.UserID)
-	if err != nil {
-		panic(err)
+		user, ok = d.Users[session.UserID]
+		if !ok {
+			s.logger.Warn("session refers to non-existent user",
+				"session_id", session.ID,
+				"user_id", session.UserID)
+		}
+	})
+	if user == nil {
+		panic("no user found in context")
 	}
 	return user
 }
@@ -92,11 +84,17 @@ func (s *idpServer) mustUserFromContext(ctx context.Context) *db.User {
 //
 // A new session ID will be generated and stored in the provided session
 // cookie.
-func (s *idpServer) putSession(w http.ResponseWriter, r *http.Request, tx *db.Tx, session *db.Session) error {
+func (s *idpServer) putSession(w http.ResponseWriter, r *http.Request, session *db.Session) error {
 	session.ID = randHex(32)
 
-	if err := tx.PutSession(r.Context(), session); err != nil {
-		s.logger.Error("failed to put session", errAttr(err))
+	err := s.db.Write(func(d *data) error {
+		if d.Sessions == nil {
+			d.Sessions = make(map[string]*db.Session)
+		}
+		d.Sessions[session.ID] = session
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 

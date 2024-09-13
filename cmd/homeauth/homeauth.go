@@ -6,8 +6,10 @@ import (
 	"crypto/rsa"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,12 +23,14 @@ import (
 	"syscall"
 	"time"
 
+	"crawshaw.dev/jsonfile"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	flag "github.com/spf13/pflag"
 
 	"github.com/andrew-d/homeauth/internal/db"
+	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/pwhash"
 	"github.com/andrew-d/homeauth/static"
 )
@@ -34,7 +38,7 @@ import (
 var (
 	port      = flag.IntP("port", "p", 8080, "Port to listen on")
 	serverURL = flag.String("server-url", fmt.Sprintf("http://localhost:%d", *port), "Public URL of the server")
-	dbPath    = flag.String("db", "homeauth.db", "Path to the database file")
+	dbPath    = flag.String("db", "homeauth.json", "Path to the database file")
 	verbose   = flag.BoolP("verbose", "v", false, "Enable verbose logging")
 )
 
@@ -46,11 +50,13 @@ func main() {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 
-	db, err := db.NewDB(logger.With("component", "db"), *dbPath)
+	db, err := jsonfile.Load[data](*dbPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		db, err = jsonfile.New[data](*dbPath)
+	}
 	if err != nil {
 		fatal(logger, "failed to open database", "path", *dbPath, errAttr(err))
 	}
-	defer db.Close()
 
 	hasher := pwhash.New(2, 512*1024, 2)
 
@@ -106,7 +112,7 @@ func main() {
 type idpServer struct {
 	logger    *slog.Logger
 	serverURL string
-	db        *db.DB
+	db        *jsonfile.JSONFile[data]
 	hasher    *pwhash.Hasher
 
 	signingKeyOnce sync.Once
@@ -257,7 +263,7 @@ func (s *idpServer) getJWKS() (keyID uint64, pkey *rsa.PrivateKey, err error) {
 func (s *idpServer) serveOpenIDConfiguration(w http.ResponseWriter, r *http.Request) {
 	// TODO: maybe use a separate endpoint for requests coming from localhost?
 
-	metadata := OpenIDProviderMetadata{
+	metadata := openidtypes.ProviderMetadata{
 		Issuer:                 s.serverURL,
 		AuthorizationEndpoint:  s.serverURL + "/authorize/public",
 		JWKS_URI:               s.serverURL + "/.well-known/jwks.json",
@@ -383,15 +389,19 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Okay, we successfully validated the request parameters. Now, see if
-	// we have an active session.
-	tx, err := s.db.ReadTx(r.Context())
-	if err != nil {
-		s.logger.Error("failed to start read transaction", errAttr(err))
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback()
-	session, ok := s.getSession(r, tx)
+	// we have a user logged in.
+	var user *db.User
+	s.db.Read(func(data *data) {
+		session, ok := s.getSession(data, r)
+		if !ok {
+			return
+		}
+
+		user, ok = data.Users[session.UserID]
+		if !ok {
+			s.logger.Warn("session refers to non-existent user", "session", session, "user_id", session.UserID)
+		}
+	})
 
 	// Per the OIDC spec § 3.1.2.3:
 	//
@@ -402,7 +412,7 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	//	return an error if an End-User is not already Authenticated or
 	//	could not be silently Authenticated.
 	prompt := r.URL.Query().Get("prompt")
-	if !ok && prompt == "none" {
+	if user == nil && prompt == "none" {
 		redirectWithError(w, r, redirectURI, "login_required", "user not authenticated", state)
 		return
 	}
@@ -413,17 +423,9 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Okay, if we don't have a session, redirect the user to login and
 	// return them to this flow after they've done that.
-	if !ok {
+	if user == nil {
 		s.logger.Debug("no session; redirecting to login")
 		s.redirectToLogin(w, r)
-		return
-	}
-
-	// Load the user from the session.
-	user, err := tx.GetUser(r.Context(), session.UserID)
-	if err != nil {
-		s.logger.Error("failed to get user from session", errAttr(err))
-		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -435,13 +437,28 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	// redirect to.
 	switch responseType {
 	case "code":
-		code := randHex(16)
-		// TODO: store code in DB
-		s.logger.Info("generated code", "code", code, "user", user.Email)
+		code := &db.OAuthCode{
+			Code:     randHex(16),
+			Expiry:   time.Now().Add(time.Minute),
+			ClientID: clientID,
+			UserID:   user.ID,
+		}
+		s.logger.Info("generated code", "code", code.Code, "user", user.Email)
+		if err := s.db.Write(func(data *data) error {
+			if data.OAuthCodes == nil {
+				data.OAuthCodes = make(map[string]*db.OAuthCode)
+			}
+			data.OAuthCodes[code.Code] = code
+			return nil
+		}); err != nil {
+			s.logger.Error("failed to save code", errAttr(err))
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 
 		// Redirect the user back to the RP with the code.
 		vals := redirectURI.Query()
-		vals.Set("code", code)
+		vals.Set("code", code.Code)
 		if state != "" {
 			vals.Set("state", state)
 		}
@@ -508,19 +525,41 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code := r.FormValue("code")
-	if code == "" {
+	codeID := r.FormValue("code")
+	if codeID == "" {
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
 
-	// TODO: load the code from our DB somewhere
-	// TODO: verify the code hasn't expired
+	var code *db.OAuthCode
+	s.db.Read(func(data *data) {
+		code = data.OAuthCodes[codeID]
+	})
+	if code == nil {
+		http.Error(w, "invalid code", http.StatusBadRequest)
+		return
+	}
+
+	// Ensure that the code hasn't expired
+	now := time.Now()
+	if now.After(code.Expiry) {
+		s.logger.Debug("code expired", "code", code.Code, "expiry", code.Expiry, "now", time.Now())
+		http.Error(w, "code expired", http.StatusBadRequest)
+		return
+	}
+
+	// Verify that the client ID matches the one used in the auth request.
+	clientID := r.FormValue("client_id")
+	if clientID != code.ClientID {
+		s.logger.Warn("client ID mismatch", "client_id", clientID, "expected", code.ClientID)
+		http.Error(w, "client ID mismatch", http.StatusBadRequest)
+		return
+	}
+
 	// TODO: verify that the relying party is allowed to make this request
 	// TODO: verify that the redirect URI matches the one used in the auth request
 
 	// Construct the claims that we're signing for this response.
-	now := time.Now()
 	claims := jwt.Claims{
 		ID:        randHex(32),
 		Issuer:    s.serverURL,
@@ -543,7 +582,7 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	at := randHex(32)
-	resp := OpenIDTokenResponse{
+	resp := openidtypes.TokenResponse{
 		IDToken:     token,
 		AccessToken: at,
 		TokenType:   "Bearer",
@@ -599,21 +638,17 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 
 	// Load the user's password hash
-	ctx := r.Context()
-	tx, err := s.db.Tx(ctx)
-	if err != nil {
-		s.logger.Error("failed to start read transaction", errAttr(err))
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback()
-
-	user, err := tx.GetUserByEmail(ctx, username)
-	if err != nil {
-		s.logger.Info("error getting user", "username", username)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	} else if user == nil {
+	var user *db.User
+	s.db.Read(func(data *data) {
+		// This is slow but fine for now since we don't have many users.
+		for _, u := range data.Users {
+			if u.Email == username {
+				user = u
+				return
+			}
+		}
+	})
+	if user == nil {
 		s.logger.Info("no such user", "username", username)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -630,16 +665,9 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		UserID: user.ID,
 		Expiry: time.Now().Add(7 * 24 * time.Hour),
 	}
-	if err := s.putSession(w, r, tx, session); err != nil {
+	if err := s.putSession(w, r, session); err != nil {
 		// callee has already logged
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// Commit the transaction now that we're all logged in.
-	if err := tx.Commit(); err != nil {
-		s.logger.Error("failed to commit transaction", errAttr(err))
-		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -660,11 +688,21 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, nextURL, http.StatusSeeOther)
 }
 
-func (s *idpServer) addUser(ctx context.Context, tx *db.Tx, email, password string) error {
+func (s *idpServer) addUser(ctx context.Context, email, password string) error {
 	hash := s.hasher.HashString(password)
-	return tx.PutUser(ctx, &db.User{
-		Email:        email,
-		PasswordHash: hash,
+	return s.db.Write(func(data *data) error {
+		for _, u := range data.Users {
+			if u.Email == email {
+				return fmt.Errorf("user already exists")
+			}
+		}
+		id := data.nextID()
+		data.Users[id] = &db.User{
+			ID:           id,
+			Email:        email,
+			PasswordHash: hash,
+		}
+		return nil
 	})
 }
 

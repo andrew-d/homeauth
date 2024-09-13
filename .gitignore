@@ -1,5 +1,6 @@
 # The database
 /homeauth.db*
+/homeauth.json
 
 # Secrets
 /client_secret*.json

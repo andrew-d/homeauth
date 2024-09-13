@@ -1,12 +1,13 @@
-package main
+// Package openidtypes provides types for the OpenID Connect protocol.
+package openidtypes
 
-// OpenIDProviderMetadata is the metadata that an OpenID Provider publishes at
-// the well-known URI "/.well-known/openid-configuration".
+// ProviderMetadata is the metadata that an OpenID Provider publishes at the
+// well-known URI "/.well-known/openid-configuration".
 //
 // The fields are specified in the specification:
 //
 //	https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata
-type OpenIDProviderMetadata struct {
+type ProviderMetadata struct {
 	Issuer                                     string   `json:"issuer"`
 	AuthorizationEndpoint                      string   `json:"authorization_endpoint"`
 	TokenEndpoint                              string   `json:"token_endpoint,omitempty"`
@@ -44,9 +45,9 @@ type OpenIDProviderMetadata struct {
 	OPTosURI                                   string   `json:"op_tos_uri,omitempty"`
 }
 
-// OpenIDTokenResponse is the response from the OpenID Provider when exchanging
-// an authorization code for an ID Token.
-type OpenIDTokenResponse struct {
+// TokenResponse is the response from the OpenID Provider when exchanging an
+// authorization code for an ID Token.
+type TokenResponse struct {
 	IDToken      string `json:"id_token"`
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
