@@ -28,7 +28,6 @@ import (
 
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/pwhash"
-	"github.com/andrew-d/homeauth/session"
 	"github.com/andrew-d/homeauth/static"
 )
 
@@ -55,11 +54,9 @@ func main() {
 
 	hasher := pwhash.New(2, 512*1024, 2)
 
-	ss := session.New[*idpSession]("homeauth", 7*24*time.Hour)
 	idp := &idpServer{
 		logger:    logger.With(slog.String("service", "idp")),
 		serverURL: *serverURL,
-		ss:        ss,
 		db:        db,
 		hasher:    hasher,
 	}
@@ -109,7 +106,6 @@ func main() {
 type idpServer struct {
 	logger    *slog.Logger
 	serverURL string
-	ss        *session.Store[*idpSession]
 	db        *db.DB
 	hasher    *pwhash.Hasher
 
@@ -117,10 +113,6 @@ type idpServer struct {
 	signingKey     *rsa.PrivateKey
 	signingKeyID   uint64
 	signer         jose.Signer
-}
-
-type idpSession struct {
-	Email string
 }
 
 func (s *idpServer) httpHandler() http.Handler {
@@ -145,7 +137,7 @@ func (s *idpServer) httpHandler() http.Handler {
 
 	// Authenticated endpoints
 	r.Group(func(r chi.Router) {
-		r.Use(s.ss.LoadContextWithHandler(http.HandlerFunc(s.redirectToLogin)))
+		r.Use(s.requireSession(http.HandlerFunc(s.redirectToLogin)))
 
 		r.Get("/account", s.serveAccount)
 	})
@@ -392,7 +384,14 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Okay, we successfully validated the request parameters. Now, see if
 	// we have an active session.
-	session, ok := s.ss.Get(r)
+	tx, err := s.db.ReadTx(r.Context())
+	if err != nil {
+		s.logger.Error("failed to start read transaction", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	session, ok := s.getSession(r, tx)
 
 	// Per the OIDC spec § 3.1.2.3:
 	//
@@ -420,6 +419,14 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Load the user from the session.
+	user, err := tx.GetUser(r.Context(), session.UserID)
+	if err != nil {
+		s.logger.Error("failed to get user from session", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	// Okay, now that we've successfully authenticated a user, we need to
 	// figure out what to reply to the RP with. Switch based on the
 	// "response_type" parameter.
@@ -430,7 +437,7 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	case "code":
 		code := randHex(16)
 		// TODO: store code in DB
-		s.logger.Info("generated code", "code", code, "user", session.Email)
+		s.logger.Info("generated code", "code", code, "user", user.Email)
 
 		// Redirect the user back to the RP with the code.
 		vals := redirectURI.Query()
@@ -593,7 +600,7 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Load the user's password hash
 	ctx := r.Context()
-	tx, err := s.db.ReadTx(ctx)
+	tx, err := s.db.Tx(ctx)
 	if err != nil {
 		s.logger.Error("failed to start read transaction", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -601,7 +608,7 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	user, err := tx.GetUser(ctx, username)
+	user, err := tx.GetUserByEmail(ctx, username)
 	if err != nil {
 		s.logger.Info("error getting user", "username", username)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -619,10 +626,24 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log the user in by creating a session.
-	session := &idpSession{
-		Email: user.Email,
+	session := &db.Session{
+		UserID: user.ID,
+		Expiry: time.Now().Add(7 * 24 * time.Hour),
 	}
-	s.ss.Put(w, r, session)
+	if err := s.putSession(w, r, tx, session); err != nil {
+		// callee has already logged
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Commit the transaction now that we're all logged in.
+	if err := tx.Commit(); err != nil {
+		s.logger.Error("failed to commit transaction", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info("logged in user", "username", username, "user_id", user.ID, "session_id", session.ID)
 
 	// Redirect the user to the 'next' parameter, or the account page if
 	// there's none provided or it's invalid.
@@ -658,7 +679,7 @@ var accountTemplate = template.Must(template.New("account").Parse(`<html>
 			<table class="table">
 				<tr style="background: transparent">
 					<th style="background: #ddd">Email</th>
-					<td style="background: transparent">{{ .Session.Email }}</td>
+					<td style="background: transparent">{{ .User.Email }}</td>
 				</tr>
 			</table>
 		</div>
@@ -667,10 +688,10 @@ var accountTemplate = template.Must(template.New("account").Parse(`<html>
 `))
 
 func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
-	session := s.ss.MustFromContext(r.Context())
+	user := s.mustUserFromContext(r.Context())
 
 	if err := accountTemplate.Execute(w, map[string]any{
-		"Session": session,
+		"User": user,
 	}); err != nil {
 		s.logger.Error("failed to render account template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)

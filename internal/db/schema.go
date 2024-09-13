@@ -4,6 +4,8 @@ import (
 	"github.com/andrew-d/homeauth/internal/migrate"
 )
 
+// TODO: "PRAGMA foreign_keys = ON;"
+
 var migrations = []migrate.Migration{
 	migrate.MigrationSQL(`
 		CREATE TABLE users (
