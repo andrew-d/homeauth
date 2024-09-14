@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	flag "github.com/spf13/pflag"
 
+	"github.com/andrew-d/homeauth/internal/buildtags"
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/internal/templates"
@@ -166,6 +167,9 @@ func (s *idpServer) httpHandler() http.Handler {
 	// Login endpoints for this application
 	r.Get("/login", s.serveGetLogin)
 	r.Post("/login", s.servePostLogin)
+
+	r.Get("/login/check-email", s.serveGetLoginCheckEmail)
+	r.Get("/login/magic", s.serveGetMagicLogin)
 
 	// Authenticated endpoints
 	r.Group(func(r chi.Router) {
@@ -956,11 +960,17 @@ func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *idpServer) serveGetLoginCheckEmail(w http.ResponseWriter, r *http.Request) {
+	if err := templates.All().ExecuteTemplate(w, "login-email.html.tmpl", nil); err != nil {
+		s.logger.Error("failed to render login-email template", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}
+}
+
 func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	username := r.FormValue("username")
-	password := r.FormValue("password")
 
-	// Load the user's password hash
+	// Load the user by their email address.
 	var user *db.User
 	s.db.Read(func(data *data) {
 		// This is slow but fine for now since we don't have many users.
@@ -977,8 +987,43 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Depending on how they want to authenticate, delegate to the right method.
+	switch r.FormValue("via") {
+	case "password":
+		s.servePostLoginPassword(w, r, user)
+	case "email":
+		s.servePostLoginEmail(w, r, user)
+	case "google":
+		// Not yet implemented
+		http.Error(w, "not implemented", http.StatusNotImplemented)
+		return
+	default:
+		s.logger.Warn("no authentication method selected", "username", username)
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+}
+
+func (s *idpServer) getNextURL(r *http.Request) string {
+	// Redirect the user to the 'next' parameter, or the account page if
+	// there's none provided or it's invalid.
+	var nextURL string = "/account"
+	if next := r.FormValue("next"); next != "" {
+		// Validate that the URL is relative and not an open redirect.
+		if u, err := url.Parse(next); err == nil && !u.IsAbs() {
+			nextURL = next
+		} else {
+			s.logger.Warn("invalid next URL", "next", next, errAttr(err), "is_abs", u.IsAbs())
+		}
+	}
+	return nextURL
+}
+
+func (s *idpServer) servePostLoginPassword(w http.ResponseWriter, r *http.Request, user *db.User) {
+	password := r.FormValue("password")
 	if !s.hasher.Verify([]byte(password), []byte(user.PasswordHash)) {
-		s.logger.Info("invalid password for user", "username", username)
+		s.logger.Info("invalid password for user", "username", user.Email)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -994,21 +1039,121 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("logged in user", "username", username, "user_uuid", user.UUID, "session_id", session.ID)
+	s.logger.Info("logged in user",
+		"username", user.Email,
+		"user_uuid", user.UUID,
+		"session_id", session.ID,
+	)
 
-	// Redirect the user to the 'next' parameter, or the account page if
-	// there's none provided or it's invalid.
-	var nextURL string = "/account"
-	if next := r.FormValue("next"); next != "" {
-		// Validate that the URL is relative and not an open redirect.
-		if u, err := url.Parse(next); err == nil && !u.IsAbs() {
-			nextURL = next
-		} else {
-			s.logger.Warn("invalid next URL", "next", next, errAttr(err), "is_abs", u.IsAbs())
+	http.Redirect(w, r, s.getNextURL(r), http.StatusSeeOther)
+}
+
+func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, user *db.User) {
+	// Generate a magic login link for this user.
+	magic := &db.MagicLoginLink{
+		Token:    randHex(64),
+		UserUUID: user.UUID,
+		Expiry:   db.JSONTime{time.Now().Add(10 * time.Minute)},
+		NextURL:  s.getNextURL(r),
+	}
+	if err := s.db.Write(func(data *data) error {
+		if data.MagicLinks == nil {
+			data.MagicLinks = make(map[string]*db.MagicLoginLink)
 		}
+		data.MagicLinks[magic.Token] = magic
+		return nil
+	}); err != nil {
+		s.logger.Error("failed to save magic login", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
 
-	http.Redirect(w, r, nextURL, http.StatusSeeOther)
+	magicURL := s.serverURL + "/login/magic?token=" + magic.Token
+	if buildtags.IsDev {
+		s.logger.Info("magic login link",
+			"user_uuid", user.UUID,
+			"url", magicURL,
+		)
+	}
+
+	// Send the user an email
+	// TODO: implement me
+	s.logger.Warn("email login not implemented", "user_uuid", user.UUID)
+
+	// Redirect the user to a landing page that says "check your email"
+	http.Redirect(w, r, "/login/check-email", http.StatusSeeOther)
+}
+
+func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "missing token", http.StatusBadRequest)
+		return
+	}
+
+	// TODO; there's a race here where multiple uses of the same magic link
+	// can happen at once; need to fix that.
+	var (
+		magic *db.MagicLoginLink
+		user  *db.User
+	)
+	s.db.Read(func(data *data) {
+		magic = data.MagicLinks[token]
+		if magic != nil {
+			user = data.Users[magic.UserUUID]
+		}
+	})
+	if magic == nil {
+		s.logger.Warn("no such magic login", "token", token)
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+	if user == nil {
+		s.logger.Error("no such user for magic login", "token", token, "user_uuid", magic.UserUUID)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Check that the token hasn't expired.
+	if time.Now().After(magic.Expiry.Time) {
+		s.logger.Warn("magic login expired", "token", token, "expiry", magic.Expiry, "now", time.Now())
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Log the user in by creating a session.
+	session := &db.Session{
+		UserUUID: user.UUID,
+		Expiry:   db.JSONTime{time.Now().Add(7 * 24 * time.Hour)},
+	}
+	if err := s.putSession(w, r, session); err != nil {
+		// callee has already logged
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Remove the magic login link from the database, now that it's been used.
+	if err := s.db.Write(func(data *data) error {
+		delete(data.MagicLinks, token)
+		return nil
+	}); err != nil {
+		s.logger.Error("failed to delete magic login", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info("logged in user via magic link",
+		"user_uuid", magic.UserUUID,
+		"session_id", session.ID,
+		"next_url", magic.NextURL,
+	)
+
+	// Redirect the user to the account page.
+	if magic.NextURL != "" {
+		http.Redirect(w, r, magic.NextURL, http.StatusSeeOther)
+	} else {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+	}
 }
 
 func (s *idpServer) addUser(ctx context.Context, email, password string) error {

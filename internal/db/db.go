@@ -73,6 +73,14 @@ type Client struct {
 	// TODO: Scopes
 }
 
+// MagicLoginLink is a random token that can be used to log in without a password.
+type MagicLoginLink struct {
+	Token    string
+	Expiry   JSONTime
+	UserUUID string
+	NextURL  string `json:",omitempty"` // optional URL to redirect to after login
+}
+
 // JSONTime is a time.Time wrapper that serializes to/from JSON as a Unix
 // timestamp in milliseconds.
 type JSONTime struct {

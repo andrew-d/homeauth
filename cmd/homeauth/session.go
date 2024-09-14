@@ -108,6 +108,7 @@ func (s *idpServer) putSession(w http.ResponseWriter, r *http.Request, session *
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
+		Path:     "/",
 		Value:    session.ID,
 		MaxAge:   int(maxAge),
 		HttpOnly: true,
@@ -120,6 +121,7 @@ func (s *idpServer) putSession(w http.ResponseWriter, r *http.Request, session *
 func (s *idpServer) clearSession(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
+		Path:     "/",
 		Value:    "",
 		MaxAge:   0,
 		HttpOnly: true,

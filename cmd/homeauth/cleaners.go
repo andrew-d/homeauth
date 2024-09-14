@@ -19,6 +19,7 @@ func (s *idpServer) runCleaners(ctx context.Context) {
 			s.cleanAccessTokens,
 			s.cleanOAuthCodes,
 			s.cleanSessions,
+			s.cleanMagicLinks,
 		} {
 			if err := cf(ctx, now, d); err != nil {
 				errs = append(errs, err)
@@ -31,10 +32,11 @@ func (s *idpServer) runCleaners(ctx context.Context) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(3)
+	wg.Add(4)
 	go s.cleanPeriodically(ctx, &wg, "sessions", 5*time.Minute, s.cleanSessions)
 	go s.cleanPeriodically(ctx, &wg, "oauth_codes", 5*time.Minute, s.cleanOAuthCodes)
-	go s.cleanPeriodically(ctx, &wg, "access_tokens", 5*time.Minute, s.cleanOAuthCodes)
+	go s.cleanPeriodically(ctx, &wg, "access_tokens", 5*time.Minute, s.cleanAccessTokens)
+	go s.cleanPeriodically(ctx, &wg, "magic_links", 5*time.Minute, s.cleanMagicLinks)
 
 	<-ctx.Done()
 	s.logger.Info("cleaners shutting down")
@@ -102,6 +104,20 @@ func (s *idpServer) cleanAccessTokens(ctx context.Context, now time.Time, d *dat
 	}
 	if cleaned > 0 {
 		s.logger.Debug("cleaned expired access tokens", "count", cleaned)
+	}
+	return nil
+}
+
+func (s *idpServer) cleanMagicLinks(ctx context.Context, now time.Time, d *data) error {
+	var cleaned int
+	for token, ml := range d.MagicLinks {
+		if ml.Expiry.Before(now) {
+			delete(d.MagicLinks, token)
+			cleaned++
+		}
+	}
+	if cleaned > 0 {
+		s.logger.Debug("cleaned expired magic links", "count", cleaned)
 	}
 	return nil
 }
