@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -43,6 +44,7 @@ func (s *idpServer) requireSession(errHandler http.Handler) func(http.Handler) h
 				return
 			}
 
+			AddRequestLogAttrs(r, slog.String("user_uuid", session.UserUUID))
 			ctx := context.WithValue(r.Context(), sessionCtxKey, session)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -66,11 +68,11 @@ func (s *idpServer) mustUserFromContext(ctx context.Context) *db.User {
 			return
 		}
 
-		user, ok = d.Users[session.UserID]
+		user, ok = d.Users[session.UserUUID]
 		if !ok {
 			s.logger.Warn("session refers to non-existent user",
 				"session_id", session.ID,
-				"user_id", session.UserID)
+				"user_uuid", session.UserUUID)
 		}
 	})
 	if user == nil {
@@ -101,7 +103,7 @@ func (s *idpServer) putSession(w http.ResponseWriter, r *http.Request, session *
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    session.ID,
-		Expires:  session.Expiry,
+		Expires:  session.Expiry.Time,
 		HttpOnly: true,
 		Secure:   r.URL.Scheme == "https",
 		SameSite: http.SameSiteStrictMode,

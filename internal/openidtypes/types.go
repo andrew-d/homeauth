@@ -1,6 +1,8 @@
 // Package openidtypes provides types for the OpenID Connect protocol.
 package openidtypes
 
+import "github.com/go-jose/go-jose/v4/jwt"
+
 // ProviderMetadata is the metadata that an OpenID Provider publishes at the
 // well-known URI "/.well-known/openid-configuration".
 //
@@ -52,5 +54,31 @@ type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
-	RefreshToken string `json:"refresh_token"`
+	RefreshToken string `json:"refresh_token,omitempty"` // TODO: omitempty okay?
+}
+
+// Claims is the set of claims that can be requested in an ID Token.
+type Claims struct {
+	// Standard claims
+	jwt.Claims `json:",inline"`
+
+	// Standard claims supported by this IdP; see OIDC spec § 5.1 for
+	// definitions of these claims.
+
+	Nonce         string `json:"nonce,omitempty"`          // nonce from the authorization request
+	Email         string `json:"email,omitempty"`          // email address of the user
+	EmailVerified bool   `json:"email_verified,omitempty"` // whether the email address has been verified
+}
+
+// UserInfoResponse is the response from the IdP for a UserInfo request, as
+// defined in the OIDC spec § 5.3.
+//
+// TODO: can we reuse the Claims type here?
+type UserInfoResponse struct {
+	Subject string `json:"sub"` // subject identifier
+
+	// Standard claims
+
+	Email         string `json:"email,omitempty"`
+	EmailVerified bool   `json:"email_verified,omitempty"`
 }

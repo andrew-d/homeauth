@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/subtle"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -19,7 +21,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	flag "github.com/spf13/pflag"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -66,6 +68,7 @@ func main() {
 		db:        db,
 		hasher:    hasher,
 	}
+	idp.printConfig()
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
@@ -84,6 +87,9 @@ func main() {
 		errCh <- srv.Serve(ln)
 	}()
 	defer logger.Info("homeauth finished")
+
+	// Start background cleaners
+	go idp.runCleaners(ctx)
 
 	logger.Info("homeauth listening, press Ctrl+C to stop",
 		"addr", fmt.Sprintf("http://localhost:%d/", *port))
@@ -114,16 +120,33 @@ type idpServer struct {
 	serverURL string
 	db        *jsonfile.JSONFile[data]
 	hasher    *pwhash.Hasher
+}
 
-	signingKeyOnce sync.Once
-	signingKey     *rsa.PrivateKey
-	signingKeyID   uint64
-	signer         jose.Signer
+func (s *idpServer) printConfig() {
+	s.logger.Info("IdP configuration",
+		"server_url", s.serverURL,
+	)
+	s.db.Read(func(data *data) {
+		s.logger.Info("IdP database",
+			"primary_signing_key", data.PrimarySigningKeyID,
+			"num_users", len(data.Users),
+			"num_clients", len(data.Clients),
+		)
+		for clientID, client := range data.Clients {
+			s.logger.Debug("client",
+				"name", client.Name,
+				"client_id", clientID,
+				"redirect_uris", client.RedirectURIs,
+			)
+		}
+	})
 }
 
 func (s *idpServer) httpHandler() http.Handler {
 	r := chi.NewRouter()
-	// TODO: request logger middleware
+	r.Use(RequestLogger(s.logger))
+
+	// TODO: Access-Control-Allow-Origin header for certain endpoints
 
 	r.Get("/", s.serveIndex)
 	r.Get("/.well-known/jwks.json", s.serveJWKS)
@@ -133,7 +156,10 @@ func (s *idpServer) httpHandler() http.Handler {
 	// OIDC IdP endpoints
 	r.Get("/authorize/public", s.serveAuthorize)
 	r.Post("/token", s.serveToken)
+
+	// Per the OIDC spec § 5.3, the "userinfo" endpoint must support GET and POST
 	r.Get("/userinfo", s.serveUserinfo)
+	r.Post("/userinfo", s.serveUserinfo)
 
 	// TODO: OIDC RP endpoints
 
@@ -218,46 +244,104 @@ func (s *idpServer) serveJWKS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *idpServer) getJWKS() (keyID uint64, pkey *rsa.PrivateKey, err error) {
-	// TODO: persist key to disk and load here
-	// TODO: generate ECDSA or Ed25519 keys here as well?
+func parseRSASigningKey(key *db.SigningKey) (keyID uint64, pkey *rsa.PrivateKey, err error) {
+	pkey, err = x509.ParsePKCS1PrivateKey(key.Key)
+	if err != nil {
+		return
+	}
 
-	s.signingKeyOnce.Do(func() {
+	keyID, err = strconv.ParseUint(key.ID, 10, 64)
+	return
+}
+
+func (s *idpServer) getJWKS() (keyID uint64, pkey *rsa.PrivateKey, err error) {
+	var key *db.SigningKey
+	s.db.Read(func(data *data) {
+		key = data.SigningKeys[data.PrimarySigningKeyID]
+	})
+
+	if key != nil {
+		keyID, pkey, err = parseRSASigningKey(key)
+		if err == nil {
+			return
+		}
+
+		s.logger.Warn("failed to parse key from database", "keyID", key.ID, errAttr(err))
+	}
+
+	err = s.db.Write(func(data *data) error {
+		// Re-check the key in case it was created while we were reading.
+		key = data.SigningKeys[data.PrimarySigningKeyID]
+		if key != nil {
+			keyID, pkey, err = parseRSASigningKey(key)
+			if err == nil {
+				return nil
+			}
+			s.logger.Warn("failed to parse key from database", "keyID", key.ID, errAttr(err))
+		}
+
+		// TODO: generate ECDSA or Ed25519 keys here as well?
 		s.logger.Info("generating new RSA key")
-		s.signingKey, err = rsa.GenerateKey(rand.Reader, 2048)
+		pkey, err = rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
 			s.logger.Error("failed to generate RSA key", errAttr(err))
-			return
+			return err
 		}
 
 		// Get a non-zero uint64 for the key ID.
 		var buf [8]byte
 		for {
 			rand.Read(buf[:]) // never actually errors
-			s.signingKeyID = binary.BigEndian.Uint64(buf[:])
-			if s.signingKeyID != 0 {
+			keyID = binary.BigEndian.Uint64(buf[:])
+			if keyID != 0 {
 				break
 			}
 		}
 
-		s.logger.Info("generated new RSA key", "keyID", s.signingKeyID)
+		s.logger.Info("generated new RSA key", "keyID", keyID)
 
-		s.signer, err = jose.NewSigner(jose.SigningKey{
-			Algorithm: jose.RS256,
-			Key:       s.signingKey,
-		}, &jose.SignerOptions{
-			EmbedJWK: false,
-			ExtraHeaders: map[jose.HeaderKey]any{
-				jose.HeaderType: "JWT",
-				"kid":           fmt.Sprint(s.signingKeyID),
-			},
-		})
-		if err != nil {
-			s.logger.Error("failed to create signer", errAttr(err))
-			return
+		// Store in data for future use.
+		data.PrimarySigningKeyID = fmt.Sprint(keyID)
+		if data.SigningKeys == nil {
+			data.SigningKeys = make(map[string]*db.SigningKey)
 		}
+		data.SigningKeys[data.PrimarySigningKeyID] = &db.SigningKey{
+			ID:        data.PrimarySigningKeyID,
+			Algorithm: "RS256",
+			Key:       x509.MarshalPKCS1PrivateKey(pkey),
+		}
+		return nil
 	})
-	return s.signingKeyID, s.signingKey, err
+	if err != nil {
+		s.logger.Error("failed to save key", errAttr(err))
+		return 0, nil, err
+	}
+	return keyID, pkey, nil
+}
+
+// TODO: cache me?
+func (s *idpServer) getJOSESigner() (jose.Signer, error) {
+	keyID, pkey, err := s.getJWKS()
+	if err != nil {
+		return nil, err
+	}
+
+	signer, err := jose.NewSigner(jose.SigningKey{
+		Algorithm: jose.RS256,
+		Key:       pkey,
+	}, &jose.SignerOptions{
+		EmbedJWK: false,
+		ExtraHeaders: map[jose.HeaderKey]any{
+			jose.HeaderType: "JWT",
+			"kid":           fmt.Sprint(keyID),
+		},
+	})
+	if err != nil {
+		s.logger.Error("failed to create signer", errAttr(err))
+		return nil, err
+	}
+
+	return signer, nil
 }
 
 func (s *idpServer) serveOpenIDConfiguration(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +356,13 @@ func (s *idpServer) serveOpenIDConfiguration(w http.ResponseWriter, r *http.Requ
 		ScopesSupported:        []string{"openid", "email"},
 		ResponseTypesSupported: []string{"id_token", "code"},
 		SubjectTypesSupported:  []string{"public"},
-		ClaimsSupported:        []string{"sub", "email"},
+		ClaimsSupported: []string{
+			// Claims from the jwt.Claims struct
+			"sub",
+
+			// Additional claims supported by this IdP
+			"email", // email address
+		},
 		IDTokenSigningAlgValuesSupported: []string{
 			// Per the OpenID spec:
 			//	"The algorithm RS256 MUST be included"
@@ -289,9 +379,95 @@ func (s *idpServer) serveOpenIDConfiguration(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+func getBearerToken(r *http.Request) (string, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", fmt.Errorf("missing authorization header")
+	}
+
+	token, ok := strings.CutPrefix(authHeader, "Bearer ")
+	if !ok {
+		return "", fmt.Errorf("authorization header does not start with Bearer")
+	}
+	return token, nil
+}
+
+// serveUserinfo serves the OpenID Connect "userinfo" endpoint.
+//
+// From the OIDC spec § 5.3:
+//
+//	The UserInfo Endpoint is an OAuth 2.0 Protected Resource that returns
+//	Claims about the authenticated End-User. To obtain the requested Claims
+//	about the End-User, the Client makes a request to the UserInfo Endpoint
+//	using an Access Token obtained through OpenID Connect Authentication.
+//	These Claims are normally represented by a JSON object that contains a
+//	collection of name and value pairs for the Claims.
 func (s *idpServer) serveUserinfo(w http.ResponseWriter, r *http.Request) {
-	// TODO
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+	tokenString, err := getBearerToken(r)
+	if err != nil {
+		s.logger.Warn("failed to get bearer token", "error", err)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	// Load the access token from the database, along with any user that it references.
+	var (
+		accessToken *db.AccessToken
+		user        *db.User
+	)
+	s.db.Read(func(data *data) {
+		accessToken = data.AccessTokens[tokenString]
+		if accessToken != nil {
+			user = data.Users[accessToken.UserUUID]
+		}
+	})
+
+	now := time.Now()
+	if accessToken == nil || accessToken.Expiry.Time.Before(now) {
+		if accessToken == nil {
+			s.logger.Warn("access token not found", "token", tokenString)
+		} else {
+			s.logger.Warn("access token expired",
+				"token", tokenString,
+				"expiry", accessToken.Expiry,
+				"now", now,
+			)
+		}
+
+		// Always return the same error if the token is invalid or
+		// expired, so as not to leak information.
+		http.Error(w, "access token not found", http.StatusUnauthorized)
+		return
+	}
+	// The user should always be found if the access token is valid, but
+	// check anyway and return the same error as above if not.
+	if user == nil {
+		s.logger.Warn("user not found",
+			"token", tokenString,
+			"user_uuid", user.UUID,
+		)
+		http.Error(w, "access token not found", http.StatusUnauthorized)
+		return
+	}
+
+	// Add the user UUID to the request log attributes.
+	AddRequestLogAttrs(r, slog.String("user_uuid", user.UUID))
+
+	// Construct the userinfo response
+	userinfo := openidtypes.UserInfoResponse{
+		Subject: user.UUID,
+		Email:   user.Email,
+		// TODO: EmailVerified
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	jenc := json.NewEncoder(w)
+	jenc.SetIndent("", "  ")
+	if err := jenc.Encode(userinfo); err != nil {
+		s.logger.Error("failed to encode userinfo response", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
@@ -390,18 +566,36 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Okay, we successfully validated the request parameters. Now, see if
 	// we have a user logged in.
-	var user *db.User
+	var (
+		user   *db.User
+		client *db.Client
+	)
 	s.db.Read(func(data *data) {
-		session, ok := s.getSession(data, r)
-		if !ok {
-			return
-		}
+		client = data.Clients[clientID]
 
-		user, ok = data.Users[session.UserID]
-		if !ok {
-			s.logger.Warn("session refers to non-existent user", "session", session, "user_id", session.UserID)
+		session, ok := s.getSession(data, r)
+		if ok {
+			user, ok = data.Users[session.UserUUID]
+			if !ok {
+				s.logger.Warn("session refers to non-existent user", "session", session, "user_uuid", session.UserUUID)
+			}
 		}
 	})
+	if client == nil {
+		s.logger.Warn("client not found", "client_id", clientID)
+		http.Error(w, "client not found", http.StatusBadRequest)
+		return
+	}
+
+	if !slices.Contains(client.RedirectURIs, redirectURI.String()) {
+		s.logger.Warn("client not allowed to redirect to URI",
+			"client_id", clientID,
+			"redirect_uri", redirectURI,
+			"allowed_uris", client.RedirectURIs,
+		)
+		http.Error(w, "client not allowed to redirect to URI", http.StatusBadRequest)
+		return
+	}
 
 	// Per the OIDC spec § 3.1.2.3:
 	//
@@ -438,10 +632,11 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	switch responseType {
 	case "code":
 		code := &db.OAuthCode{
-			Code:     randHex(16),
-			Expiry:   time.Now().Add(time.Minute),
-			ClientID: clientID,
-			UserID:   user.ID,
+			Code:        randHex(16),
+			Expiry:      db.JSONTime{time.Now().Add(time.Minute)},
+			ClientID:    clientID,
+			UserUUID:    user.UUID,
+			RedirectURI: redirectURI.String(),
 		}
 		s.logger.Info("generated code", "code", code.Code, "user", user.Email)
 		if err := s.db.Write(func(data *data) error {
@@ -531,24 +726,39 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var code *db.OAuthCode
+	var (
+		code   *db.OAuthCode
+		user   *db.User
+		client *db.Client
+	)
 	s.db.Read(func(data *data) {
 		code = data.OAuthCodes[codeID]
+		if code != nil {
+			user = data.Users[code.UserUUID]
+		}
+		client = data.Clients[code.ClientID]
 	})
-	if code == nil {
+	if code == nil || user == nil {
+		s.logger.Warn("invalid code",
+			"code", codeID,
+			"code_found", code != nil,
+			"user_found", user != nil,
+		)
 		http.Error(w, "invalid code", http.StatusBadRequest)
 		return
 	}
 
 	// Ensure that the code hasn't expired
 	now := time.Now()
-	if now.After(code.Expiry) {
+	if now.After(code.Expiry.Time) {
 		s.logger.Debug("code expired", "code", code.Code, "expiry", code.Expiry, "now", time.Now())
 		http.Error(w, "code expired", http.StatusBadRequest)
 		return
 	}
 
-	// Verify that the client ID matches the one used in the auth request.
+	// Per the OIDC spec § 3.1.3.2, "Token Request Validation":
+	//
+	// "Ensure the Authorization Code was issued to the authenticated Client."
 	clientID := r.FormValue("client_id")
 	if clientID != code.ClientID {
 		s.logger.Warn("client ID mismatch", "client_id", clientID, "expected", code.ClientID)
@@ -556,36 +766,180 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: verify that the relying party is allowed to make this request
-	// TODO: verify that the redirect URI matches the one used in the auth request
-
-	// Construct the claims that we're signing for this response.
-	claims := jwt.Claims{
-		ID:        randHex(32),
-		Issuer:    s.serverURL,
-		Subject:   "TODO",
-		IssuedAt:  jwt.NewNumericDate(now),
-		NotBefore: jwt.NewNumericDate(now.Add(-10 * time.Second)), // grace period for clock skew
-		Expiry:    jwt.NewNumericDate(now.Add(5 * time.Minute)),
-		Audience:  jwt.Audience{"TODO-client-id-here"},
+	// Verify that the client secret is correct.
+	clientSecret := r.FormValue("client_secret")
+	if !secureCompareStrings(clientSecret, client.ClientSecret) {
+		s.logger.Warn("client secret mismatch",
+			"client_id", clientID,
+			"client_secret", clientSecret,
+			"expected", client.ClientSecret,
+		)
+		http.Error(w, "client secret mismatch", http.StatusBadRequest)
+		return
 	}
 
-	s.getJWKS() // TODO: using for side effect, which I don't love
-	signer := s.signer
+	// "Verify that the Authorization Code is valid"; we did this above
+	// when we fetched the token from the database.
+
+	// "if possible, verify that the Authorization Code has not been
+	// previously used"
+	//
+	// We do this by deleting the code from the database after it's used,
+	// but giving ourselves a short grace period in case there's a network
+	// issue or the user refreshes at an inopportune time.
+	//
+	// We do this when creating an access token, below.
+
+	// "Ensure that the redirect_uri parameter value is identical to the
+	// redirect_uri parameter value that was included in the initial
+	// Authorization Request."
+	providedRedirectURI := r.FormValue("redirect_uri")
+	if providedRedirectURI == "" {
+		// "If the redirect_uri parameter value is not present when
+		// there is only one registered redirect_uri value, the
+		// Authorization Server MAY return an error (since the Client
+		// should have included the parameter) or MAY proceed without
+		// an error (since OAuth 2.0 permits the parameter to be
+		// omitted in this case)."
+		//
+		// TODO: check the client's redirect URIs
+		http.Error(w, "missing redirect_uri", http.StatusNotImplemented)
+	} else if code.RedirectURI != providedRedirectURI {
+		s.logger.Warn("redirect URI mismatch",
+			"provided_redirect_uri", providedRedirectURI,
+			"redirect_uri", code.RedirectURI,
+		)
+		http.Error(w, "redirect URI mismatch", http.StatusBadRequest)
+		return
+	}
+
+	// TODO: "Verify that the Authorization Code used was issued in
+	// response to an OpenID Connect Authentication Request (so that an ID
+	// Token will be returned from the Token Endpoint)."
+
+	// Construct the claims that we're signing for this response, per the
+	claims := openidtypes.Claims{
+		Claims: jwt.Claims{
+			// jti: TODO: is this required?
+			ID: randHex(32),
+
+			// "iss: REQUIRED. Issuer Identifier for the Issuer of the
+			// response. The iss value is a case-sensitive URL using the
+			// https scheme that contains scheme, host, and optionally,
+			// port number and path components and no query or fragment
+			// components."
+			Issuer: s.serverURL,
+
+			// "sub: REQUIRED. Subject Identifier. A locally unique and
+			// never reassigned identifier within the Issuer for the
+			// End-User, which is intended to be consumed by the Client,
+			// e.g., 24400320 or AItOawmwtWwcT0k51BayewNvutrJUqsvl6qs7A4.
+			//
+			// It MUST NOT exceed 255 ASCII [RFC20] characters in length.
+			// The sub value is a case-sensitive string."
+			Subject: user.UUID,
+
+			// "aud: REQUIRED. Audience(s) that this ID Token is intended
+			// for. It MUST contain the OAuth 2.0 client_id of the Relying
+			// Party as an audience value. It MAY also contain identifiers
+			// for other audiences. In the general case, the aud value is
+			// an array of case-sensitive strings. In the common special
+			// case when there is one audience, the aud value MAY be a
+			// single case-sensitive string."
+			Audience: jwt.Audience{clientID},
+
+			// "exp: REQUIRED. Expiration time on or after which the ID
+			// Token MUST NOT be accepted by the RP when performing
+			// authentication with the OP.
+			//
+			// NOTE: The ID Token expiration time is unrelated the lifetime
+			// of the authenticated session between the RP and the OP."
+			Expiry: jwt.NewNumericDate(now.Add(5 * time.Minute)),
+
+			// "iat: REQUIRED. Time at which the JWT was issued. Its value
+			// is a JSON number representing the number of seconds from
+			// 1970-01-01T00:00:00Z as measured in UTC until the
+			// date/time."
+			IssuedAt: jwt.NewNumericDate(now),
+
+			// "nbf: TODO"
+			NotBefore: jwt.NewNumericDate(now.Add(-10 * time.Second)), // grace period for clock skew
+		},
+
+		// "nonce: String value used to associate a Client session with an ID
+		// Token, and to mitigate replay attacks. The value is passed
+		// through unmodified from the Authentication Request to the ID
+		// Token. [...] If present in the Authentication Request,
+		// Authorization Servers MUST include a nonce Claim in the ID
+		// Token with the Claim Value being the nonce value sent in the
+		// Authentication Request. Authorization Servers SHOULD perform
+		// no other processing on nonce values used. The nonce value is
+		// a case-sensitive string."
+		Nonce: r.FormValue("nonce"),
+
+		// "email: End-User's preferred e-mail address. Its value MUST
+		// conform to the RFC 5322 [RFC5322] addr-spec syntax. The RP
+		// MUST NOT rely upon this value being unique, as discussed in
+		// Section 5.7"
+		Email: user.Email,
+
+		// TODO: check auth_time?
+		// TODO: EmailVerified once we have email verification
+	}
+
+	signer, err := s.getJOSESigner()
+	if err != nil {
+		s.logger.Error("failed to get JOSE signer", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	// Sign the claims with our private key.
-	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	idToken, err := jwt.Signed(signer).Claims(claims).Serialize()
 	if err != nil {
 		s.logger.Error("failed to sign token", errAttr(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	at := randHex(32)
+	// Now, generate an access token, which is entirely different from the
+	// ID token and can just be a random string that we store for later
+	// use. Store it in our database for later use.
+	at := &db.AccessToken{
+		Token:    randHex(32),
+		Expiry:   db.JSONTime{now.Add(5 * time.Minute)},
+		UserUUID: user.UUID,
+	}
+	s.db.Write(func(data *data) error {
+		if data.AccessTokens == nil {
+			data.AccessTokens = make(map[string]*db.AccessToken)
+		}
+		data.AccessTokens[at.Token] = at
+
+		// Remove the now-used code from the database.
+		//
+		// NOTE: only do this after we've done all the work required
+		// and won't error out.
+		delete(data.OAuthCodes, codeID)
+		return nil
+	})
+
+	// Construct the actual response, per the OIDC spec § 3.1.3.3.
 	resp := openidtypes.TokenResponse{
-		IDToken:     token,
-		AccessToken: at,
-		TokenType:   "Bearer",
+		// "The OAuth 2.0 token_type response parameter value MUST be
+		// Bearer [...]"
+		TokenType: "Bearer",
+
+		// "In addition to the response parameters specified by OAuth
+		// 2.0, the following parameters MUST be included in the
+		// response:
+		//
+		//    id_token   ID Token value associated with the
+		//               authenticated session."
+		IDToken: idToken,
+
+		// The actual token values.
+		AccessToken: at.Token,
 		ExpiresIn:   5 * 60, // 5 minutes
 		// TODO: refresh token?
 	}
@@ -662,8 +1016,8 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Log the user in by creating a session.
 	session := &db.Session{
-		UserID: user.ID,
-		Expiry: time.Now().Add(7 * 24 * time.Hour),
+		UserUUID: user.UUID,
+		Expiry:   db.JSONTime{time.Now().Add(7 * 24 * time.Hour)},
 	}
 	if err := s.putSession(w, r, session); err != nil {
 		// callee has already logged
@@ -671,7 +1025,7 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("logged in user", "username", username, "user_id", user.ID, "session_id", session.ID)
+	s.logger.Info("logged in user", "username", username, "user_uuid", user.UUID, "session_id", session.ID)
 
 	// Redirect the user to the 'next' parameter, or the account page if
 	// there's none provided or it's invalid.
@@ -696,9 +1050,9 @@ func (s *idpServer) addUser(ctx context.Context, email, password string) error {
 				return fmt.Errorf("user already exists")
 			}
 		}
-		id := data.nextID()
-		data.Users[id] = &db.User{
-			ID:           id,
+		uu := randUUID()
+		data.Users[uu] = &db.User{
+			UUID:         uu,
 			Email:        email,
 			PasswordHash: hash,
 		}
@@ -740,6 +1094,14 @@ func randHex(n int) string {
 	buf := make([]byte, n)
 	rand.Read(buf)
 	return fmt.Sprintf("%x", buf)
+}
+
+func randUUID() string {
+	return uuid.Must(uuid.NewRandom()).String()
+}
+
+func secureCompareStrings(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func fatal(logger *slog.Logger, msg string, args ...any) {
