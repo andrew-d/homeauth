@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Account Page</title>
+  <link rel="stylesheet" href="/css/milligram.min.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <style>
+    .account-info {
+      border: 1px solid #ccc;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .account-info > div {
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #ccc;
+    }
+    .account-info > div:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .button-container {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 20px;
+    }
+    .button-container form {
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="navbar">
+    <h3><a href="/">homeauth</a></h3>
+  </div>
+  <div class="container">
+    <div class="row">
+      <div class="column column-50 column-offset-25">
+        <h1>Account Information</h1>
+        <div class="account-info">
+          <div class="row">
+            <div class="column column-33">
+              <strong>Email:</strong>
+            </div>
+            <div class="column">
+              <span>{{ .User.Email }}</span>
+            </div>
+          </div>
+          <div class="row">
+            <div class="column column-33">
+              <strong>User ID:</strong>
+            </div>
+            <div class="column">
+              <span>{{ .User.UUID }}</span>
+            </div>
+          </div>
+          <div class="row">
+            <div class="column column-33">
+              <strong># Sessions</strong>
+            </div>
+            <div class="column">
+              <span>{{ .NumSessions }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="button-container">
+          <form action="/account/logout" method="POST">
+            <button type="submit" class="button">Log Out</button>
+          </form>
+          <form action="/account/logout-other-sessions" method="POST">
+            <button type="submit" class="button button-outline">Log Out Other Sessions</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

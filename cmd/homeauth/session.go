@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/andrew-d/homeauth/internal/db"
 )
@@ -100,13 +101,29 @@ func (s *idpServer) putSession(w http.ResponseWriter, r *http.Request, session *
 		return err
 	}
 
+	// Calculate how long the cookie should last based on the current time.
+	// We send this as a MaxAge value to the client, instead of an absolute
+	// expiry, to be safe even if the client's clock is off.
+	maxAge := session.Expiry.Sub(time.Now()) / time.Second
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    session.ID,
-		Expires:  session.Expiry.Time,
+		MaxAge:   int(maxAge),
 		HttpOnly: true,
 		Secure:   r.URL.Scheme == "https",
 		SameSite: http.SameSiteStrictMode,
 	})
 	return nil
+}
+
+func (s *idpServer) clearSession(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		MaxAge:   0,
+		HttpOnly: true,
+		Secure:   r.URL.Scheme == "https",
+		SameSite: http.SameSiteStrictMode,
+	})
 }

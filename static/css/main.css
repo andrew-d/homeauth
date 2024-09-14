@@ -1,0 +1,25 @@
+/* Floating navbar at the top of the page */
+.navbar {
+  background-color: #f8f8f8;
+  padding: 10px 20px;
+  position: fixed;
+  top: 0;
+  width: 100%;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  z-index: 1000;
+}
+.navbar h3 {
+  margin: 0;
+}
+.navbar a {
+  color: inherit;
+  text-decoration: none;
+}
+.container {
+  margin-top: 60px; /* Adjust for reduced navbar height */
+}
+
+/* Helper class to remove the preceding border from a <pre> element */
+pre.no-border {
+  border-left: none;
+}

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/openidtypes"
+	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
 	"github.com/andrew-d/homeauth/static"
 )
@@ -172,6 +172,8 @@ func (s *idpServer) httpHandler() http.Handler {
 		r.Use(s.requireSession(http.HandlerFunc(s.redirectToLogin)))
 
 		r.Get("/account", s.serveAccount)
+		r.Post("/account/logout", s.serveLogout)
+		r.Post("/account/logout-other-sessions", s.serveLogoutOtherSessions)
 	})
 
 	// Add static assets
@@ -193,26 +195,9 @@ func (s *idpServer) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login?"+vals.Encode(), http.StatusSeeOther)
 }
 
-var homeTemplate = template.Must(template.New("home").Parse(`<html>
-	<head>
-		<title>IDP Home</title>
-		<link rel="stylesheet" href="/css/min.css">
-	</head>
-	<body>
-		<div class="container" style="margin-top: 1em">
-			<h1>IDP Home</h1>
-			<ul>
-				<li><a href="/login">Login</a></li>
-				<li><a href="/account">Account</a></li>
-			</ul>
-		</div>
-	</body>
-	</html>
-`))
-
 func (s *idpServer) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
-		homeTemplate.Execute(w, nil)
+		templates.All().ExecuteTemplate(w, "index.html.tmpl", nil)
 		return
 	}
 
@@ -960,26 +945,10 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var loginTemplate = template.Must(template.New("login").Parse(`<html>
-	<head>
-		<title>Login</title>
-		<link rel="stylesheet" href="/css/min.css">
-	</head>
-	<body>
-		<div class="container" style="margin-top: 1em">
-			<h1>Login</h1>
-			<form action="/login?next={{.Next}}" method="POST">
-				<input type="text" class="smooth" name="username" placeholder="username">
-				<input type="password" class="smooth" name="password" placeholder="password">
-				<input type="submit" class="btn btn-b btn-sm smooth" value="Login">
-			</form>
-		</div>
-	</body>
-	</html>
-`))
-
 func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
-	if err := loginTemplate.Execute(w, map[string]any{
+	// TODO: verify the 'next' parameter is a valid URL?
+
+	if err := templates.All().ExecuteTemplate(w, "login.html.tmpl", map[string]any{
 		"Next": r.URL.Query().Get("next"),
 	}); err != nil {
 		s.logger.Error("failed to render login template", errAttr(err))
@@ -1060,34 +1029,81 @@ func (s *idpServer) addUser(ctx context.Context, email, password string) error {
 	})
 }
 
-var accountTemplate = template.Must(template.New("account").Parse(`<html>
-	<head>
-		<title>Account</title>
-		<link rel="stylesheet" href="/css/min.css">
-	</head>
-	<body>
-		<div class="container" style="margin-top: 1em">
-			<h1>Your Account</h1>
-			<table class="table">
-				<tr style="background: transparent">
-					<th style="background: #ddd">Email</th>
-					<td style="background: transparent">{{ .User.Email }}</td>
-				</tr>
-			</table>
-		</div>
-	</body>
-	</html>
-`))
-
 func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 	user := s.mustUserFromContext(r.Context())
 
-	if err := accountTemplate.Execute(w, map[string]any{
-		"User": user,
+	var (
+		numSessions int
+	)
+	s.db.Read(func(data *data) {
+		for _, session := range data.Sessions {
+			if session.UserUUID == user.UUID {
+				numSessions++
+			}
+		}
+	})
+
+	if err := templates.All().ExecuteTemplate(w, "account.html.tmpl", map[string]any{
+		"User":        user,
+		"NumSessions": numSessions,
 	}); err != nil {
 		s.logger.Error("failed to render account template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}
+}
+
+func (s *idpServer) serveLogout(w http.ResponseWriter, r *http.Request) {
+	currSession, ok := s.sessionFromContext(r.Context())
+	if !ok {
+		s.logger.Error("no session found in context")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Delete all sessions for the current user.
+	s.db.Write(func(data *data) error {
+		for _, session := range data.Sessions {
+			if session.UserUUID != currSession.UserUUID {
+				continue
+			}
+			delete(data.Sessions, session.ID)
+		}
+		return nil
+	})
+
+	// Set an empty session cookie as well
+	// TODO: this doesn't work; we end up sending a header on login like
+	// `session=; session=...` which doesn't work. Removing the session
+	// above is enough for now.
+	//s.clearSession(w, r)
+
+	// TODO: we should use a flash message here or something
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+func (s *idpServer) serveLogoutOtherSessions(w http.ResponseWriter, r *http.Request) {
+	currSession, ok := s.sessionFromContext(r.Context())
+	if !ok {
+		s.logger.Error("no session found in context")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Delete all sessions except the current one.
+	s.db.Write(func(data *data) error {
+		for _, session := range data.Sessions {
+			if session.UserUUID != currSession.UserUUID {
+				continue
+			}
+			if session.ID != currSession.ID {
+				delete(data.Sessions, session.ID)
+			}
+		}
+		return nil
+	})
+
+	// TODO: we should use a flash message here or something
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
 
 func randHex(n int) string {
