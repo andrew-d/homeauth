@@ -498,9 +498,9 @@ func (s *idpServer) serveUserinfo(w http.ResponseWriter, r *http.Request) {
 
 	// Construct the userinfo response
 	userinfo := openidtypes.UserInfoResponse{
-		Subject: user.UUID,
-		Email:   user.Email,
-		// TODO: EmailVerified
+		Subject:       user.UUID,
+		Email:         user.Email,
+		EmailVerified: user.EmailVerified,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
