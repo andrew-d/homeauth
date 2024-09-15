@@ -75,6 +75,9 @@ func main() {
 		db:        db,
 		hasher:    hasher,
 	}
+	if err := idp.initializeConfig(); err != nil {
+		fatal(logger, "invalid configuration", errAttr(err))
+	}
 	idp.printConfig()
 
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
@@ -123,19 +126,51 @@ func main() {
 }
 
 type idpServer struct {
-	logger    *slog.Logger
-	serverURL string
-	db        *jsonfile.JSONFile[data]
-	hasher    *pwhash.Hasher
+	logger         *slog.Logger
+	serverURL      string
+	serverHostname string
+	db             *jsonfile.JSONFile[data]
+	hasher         *pwhash.Hasher
+}
+
+func (s *idpServer) initializeConfig() error {
+	// Parse our server URL to get the hostname.
+	u, err := url.Parse(s.serverURL)
+	if err != nil {
+		// No point in continuing if the server URL is invalid.
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+	s.serverHostname = u.Hostname()
+
+	// Verify the config in the database.
+	var errs []error
+	s.db.Read(func(data *data) {
+		if e := data.Email; e != nil {
+			// Verify that the SMTP server is a valid host:port.
+			if e.SMTPServer == "" {
+				errs = append(errs, errors.New("missing SMTP server"))
+			} else if _, _, err := net.SplitHostPort(e.SMTPServer); err != nil {
+				errs = append(errs, fmt.Errorf("invalid SMTP server: %w", err))
+			}
+
+			useTLS := (e.UseTLS != nil && *e.UseTLS)
+			useStartTLS := (e.UseStartTLS != nil && *e.UseStartTLS)
+			if useTLS && useStartTLS {
+				errs = append(errs, errors.New("cannot use both TLS and StartTLS"))
+			}
+		}
+	})
+
+	return errors.Join(errs...)
 }
 
 func (s *idpServer) printConfig() {
 	s.logger.Info("IdP configuration",
 		"server_url", s.serverURL,
+		"server_hostname", s.serverHostname,
 	)
 	s.db.Read(func(data *data) {
 		s.logger.Info("IdP database",
-			"primary_signing_key", data.PrimarySigningKeyID,
 			"num_users", len(data.Users),
 			"num_clients", len(data.Clients),
 		)
@@ -144,6 +179,19 @@ func (s *idpServer) printConfig() {
 				"name", client.Name,
 				"client_id", clientID,
 				"redirect_uris", client.RedirectURIs,
+			)
+		}
+
+		s.logger.Info("IdP cryptographic keys",
+			"primary_signing_key", data.PrimarySigningKeyID,
+		)
+		if e := data.Email; e != nil {
+			s.logger.Info("IdP email configuration",
+				"from_address", e.FromAddress,
+				"smtp_server", e.SMTPServer,
+				"smtp_username", e.SMTPUsername,
+				"use_tls", e.useTLS(),
+				"use_starttls", e.useStartTLS(),
 			)
 		}
 	})
@@ -878,8 +926,14 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 		// Section 5.7"
 		Email: user.Email,
 
+		// "email_verified: True if the End-User's e-mail address has
+		// been verified; otherwise false. When this Claim Value is
+		// true, this means that the OP took affirmative steps to
+		// ensure that this e-mail address was controlled by the
+		// End-User at the time the verification was performed."
+		EmailVerified: user.EmailVerified,
+
 		// TODO: check auth_time?
-		// TODO: EmailVerified once we have email verification
 	}
 
 	signer, err := s.getJOSESigner()
@@ -1079,32 +1133,27 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 
 	magicURL := s.serverURL + "/login/magic?token=" + magic.Token
 	if buildtags.IsDev {
-		s.logger.Info("magic login link",
+		s.logger.Info("generated magic login link",
 			"user_uuid", user.UUID,
 			"url", magicURL,
 		)
 	}
 
 	fromAddr := cmp.Or(emailConfig.FromAddress, emailConfig.SMTPUsername)
+	subject := fmt.Sprintf("Login to homeauth (%s)", s.serverHostname)
 
 	// Send the user an email
 	e := &email.Email{
 		To:      []string{user.Email},
 		From:    fmt.Sprintf("homeauth <%s>", fromAddr),
-		Subject: cmp.Or(emailConfig.Subject, "Login to homeauth"), // TODO: add hostname for this server
+		Subject: cmp.Or(emailConfig.Subject, subject),
 		Text:    []byte("Use this link to log in: " + magicURL),
 		HTML:    makeEmailBody(magicURL),
 	}
 
-	// Split the host and port from the address.
-	// TODO: do this at startup
-	host, _, err := net.SplitHostPort(emailConfig.SMTPServer)
-	if err != nil {
-		s.logger.Error("failed to split SMTP server address", errAttr(err))
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
+	// Split the host and port from the address; we know this never fails
+	// because initializeConfig checked.
+	host, _, _ := net.SplitHostPort(emailConfig.SMTPServer)
 	auth := smtp.PlainAuth(
 		emailConfig.FromAddress,  // identity
 		emailConfig.SMTPUsername, // user
@@ -1113,14 +1162,12 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 	)
 
 	// Use TLS if either explicitly set or no TLS options are set.
-	useTLS := (emailConfig.UseTLS != nil && *emailConfig.UseTLS) ||
-		(emailConfig.UseTLS == nil && emailConfig.UseStartTLS == nil)
-
-	if useTLS {
+	var err error
+	if emailConfig.useTLS() {
 		err = e.SendWithTLS(emailConfig.SMTPServer, auth, &tls.Config{
 			ServerName: host,
 		})
-	} else if emailConfig.UseStartTLS != nil && *emailConfig.UseStartTLS {
+	} else if emailConfig.useStartTLS() {
 		err = e.SendWithStartTLS(emailConfig.SMTPServer, auth, &tls.Config{
 			ServerName: host,
 		})

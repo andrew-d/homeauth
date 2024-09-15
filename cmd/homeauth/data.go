@@ -51,3 +51,25 @@ type EmailConfig struct {
 	// server. See the UseTLS field for more information.
 	UseStartTLS *bool `json:",omitempty"`
 }
+
+func (e *EmailConfig) useTLS() bool {
+	// If explicitly set, use that.
+	if e.UseTLS != nil {
+		return *e.UseTLS
+	}
+
+	// If UseStartTLS is unset, default to using TLS (but not StartTLS).
+	if e.UseStartTLS == nil {
+		return true
+	}
+
+	// UseStartTLS is set, so we don't default to using TLS.
+	return false
+}
+
+func (e *EmailConfig) useStartTLS() bool {
+	if e.UseStartTLS != nil {
+		return *e.UseStartTLS
+	}
+	return false
+}
