@@ -10,6 +10,11 @@ type User struct {
 	UUID         string
 	Email        string
 	PasswordHash string
+
+	// EmailVerified is whether the user has verified their email address,
+	// either via logging in with a method that requires receiving an
+	// email, or via another method.
+	EmailVerified bool `json:",omitempty"`
 }
 
 // Session is a user session in the database.

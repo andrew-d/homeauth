@@ -4,3 +4,4 @@
 
 # Secrets
 /client_secret*.json
+/*_credentials.csv

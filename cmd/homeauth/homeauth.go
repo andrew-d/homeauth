@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/subtle"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
@@ -14,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"os"
 	"os/signal"
@@ -21,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"crawshaw.dev/jsonfile"
@@ -28,6 +33,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
+	"github.com/jordan-wright/email"
 	flag "github.com/spf13/pflag"
 
 	"github.com/andrew-d/homeauth/internal/buildtags"
@@ -1056,7 +1062,10 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 		Expiry:   db.JSONTime{time.Now().Add(10 * time.Minute)},
 		NextURL:  s.getNextURL(r),
 	}
+
+	var emailConfig *EmailConfig
 	if err := s.db.Write(func(data *data) error {
+		emailConfig = data.Email
 		if data.MagicLinks == nil {
 			data.MagicLinks = make(map[string]*db.MagicLoginLink)
 		}
@@ -1076,12 +1085,85 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 		)
 	}
 
+	fromAddr := cmp.Or(emailConfig.FromAddress, emailConfig.SMTPUsername)
+
 	// Send the user an email
-	// TODO: implement me
-	s.logger.Warn("email login not implemented", "user_uuid", user.UUID)
+	e := &email.Email{
+		To:      []string{user.Email},
+		From:    fmt.Sprintf("homeauth <%s>", fromAddr),
+		Subject: cmp.Or(emailConfig.Subject, "Login to homeauth"), // TODO: add hostname for this server
+		Text:    []byte("Use this link to log in: " + magicURL),
+		HTML:    makeEmailBody(magicURL),
+	}
+
+	// Split the host and port from the address.
+	// TODO: do this at startup
+	host, _, err := net.SplitHostPort(emailConfig.SMTPServer)
+	if err != nil {
+		s.logger.Error("failed to split SMTP server address", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	auth := smtp.PlainAuth(
+		emailConfig.FromAddress,  // identity
+		emailConfig.SMTPUsername, // user
+		emailConfig.SMTPPassword, // password
+		host,                     // host
+	)
+
+	// Use TLS if either explicitly set or no TLS options are set.
+	useTLS := (emailConfig.UseTLS != nil && *emailConfig.UseTLS) ||
+		(emailConfig.UseTLS == nil && emailConfig.UseStartTLS == nil)
+
+	if useTLS {
+		err = e.SendWithTLS(emailConfig.SMTPServer, auth, &tls.Config{
+			ServerName: host,
+		})
+	} else if emailConfig.UseStartTLS != nil && *emailConfig.UseStartTLS {
+		err = e.SendWithStartTLS(emailConfig.SMTPServer, auth, &tls.Config{
+			ServerName: host,
+		})
+	} else {
+		// No TLS; TODO: should we disable this?
+		err = e.Send(emailConfig.SMTPServer, auth)
+	}
+
+	if err != nil {
+		s.logger.Error("failed to send email", errAttr(err))
+		http.Error(w, "internal server error; failed to send email", http.StatusInternalServerError)
+		return
+	}
 
 	// Redirect the user to a landing page that says "check your email"
 	http.Redirect(w, r, "/login/check-email", http.StatusSeeOther)
+}
+
+// emailBodyTemplate is an HTML template for the email body we send to users
+// for them to log in. Most email clients have a fairly restrictive set of
+// allowed formatting for emails, so we keep this simple.
+//
+// TODO: make this look a bit nicer
+var emailBodyTemplate = template.Must(template.New("email").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>homeauth login</title>
+</head>
+<body>
+<p>Use this link to log in:</p>
+<p><a href="{{ .MagicURL }}">click here</a></p>
+</body>
+</html>`))
+
+func makeEmailBody(magicURL string) []byte {
+	var buf bytes.Buffer
+	if err := emailBodyTemplate.Execute(&buf, map[string]any{
+		"MagicURL": magicURL,
+	}); err != nil {
+		panic(fmt.Sprintf("failed to execute email body template: %v", err))
+	}
+	return buf.Bytes()
 }
 
 func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
@@ -1132,12 +1214,18 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove the magic login link from the database, now that it's been used.
 	if err := s.db.Write(func(data *data) error {
+		// Remove the magic login link from the database, now that it's
+		// been used; TODO see above with a race
 		delete(data.MagicLinks, token)
+
+		// Update this user's EmailVerified field; now that they've
+		// logged in via an email link, we know they control that email
+		// address.
+		data.Users[user.UUID].EmailVerified = true
 		return nil
 	}); err != nil {
-		s.logger.Error("failed to delete magic login", errAttr(err))
+		s.logger.Error("failed to update database after login", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
