@@ -5,3 +5,6 @@
 # Secrets
 /client_secret*.json
 /*_credentials.csv
+
+# Code coverage
+c.out

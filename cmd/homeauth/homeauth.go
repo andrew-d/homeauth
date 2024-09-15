@@ -778,8 +778,8 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 		code = data.OAuthCodes[codeID]
 		if code != nil {
 			user = data.Users[code.UserUUID]
+			client = data.Clients[code.ClientID]
 		}
-		client = data.Clients[code.ClientID]
 	})
 	if code == nil || user == nil {
 		s.logger.Warn("invalid code",

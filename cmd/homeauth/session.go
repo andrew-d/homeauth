@@ -105,27 +105,25 @@ func (s *idpServer) putSession(w http.ResponseWriter, r *http.Request, session *
 	// We send this as a MaxAge value to the client, instead of an absolute
 	// expiry, to be safe even if the client's clock is off.
 	maxAge := session.Expiry.Sub(time.Now()) / time.Second
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Path:     "/",
-		Value:    session.ID,
-		MaxAge:   int(maxAge),
-		HttpOnly: true,
-		Secure:   r.URL.Scheme == "https",
-		SameSite: http.SameSiteStrictMode,
-	})
+	cookie := sessionCookieFor(session.ID, r.URL.Scheme == "https")
+	cookie.MaxAge = int(maxAge)
+	http.SetCookie(w, cookie)
 	return nil
 }
 
 func (s *idpServer) clearSession(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
+	cookie := sessionCookieFor("", r.URL.Scheme == "https")
+	cookie.MaxAge = -1
+	http.SetCookie(w, cookie)
+}
+
+func sessionCookieFor(sessionID string, secure bool) *http.Cookie {
+	return &http.Cookie{
 		Name:     sessionCookieName,
 		Path:     "/",
-		Value:    "",
-		MaxAge:   0,
+		Value:    sessionID,
 		HttpOnly: true,
-		Secure:   r.URL.Scheme == "https",
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
-	})
+	}
 }
