@@ -267,9 +267,7 @@ func TestAuthorizeFailure(t *testing.T) {
 			"scope":        {"openid"},
 			"state":        {"test-state"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("invalid_client", func(t *testing.T) {
 		resp := makeAuthorizeRequest(t, url.Values{
@@ -279,9 +277,7 @@ func TestAuthorizeFailure(t *testing.T) {
 			"scope":         {"openid"},
 			"state":         {"test-state"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("invalid_redirect_uri", func(t *testing.T) {
 		resp := makeAuthorizeRequest(t, url.Values{
@@ -291,9 +287,7 @@ func TestAuthorizeFailure(t *testing.T) {
 			"scope":         {"openid"},
 			"state":         {"test-state"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("missing_oidc_scope", func(t *testing.T) {
 		resp := makeAuthorizeRequest(t, url.Values{
@@ -303,9 +297,7 @@ func TestAuthorizeFailure(t *testing.T) {
 			"state":         {"test-state"},
 			// NOTE: missing scope
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("invalid_response_type", func(t *testing.T) {
 		resp := makeAuthorizeRequest(t, url.Values{
@@ -315,9 +307,7 @@ func TestAuthorizeFailure(t *testing.T) {
 			"scope":         {"openid"},
 			"state":         {"test-state"},
 		})
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Fatalf("expected 501 Not Implemented, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusNotImplemented)
 	})
 }
 
@@ -368,9 +358,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("missing_code", func(t *testing.T) {
 		resp := makeTokenRequest(t, url.Values{
@@ -380,9 +368,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("invalid_code", func(t *testing.T) {
 		resp := makeTokenRequest(t, url.Values{
@@ -392,9 +378,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("code_expired", func(t *testing.T) {
 		// Clean up by resetting our fake code when we're done
@@ -416,9 +400,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("missing_client_id", func(t *testing.T) {
 		resp := makeTokenRequest(t, url.Values{
@@ -428,9 +410,7 @@ func TestTokenFailure(t *testing.T) {
 			// NOTE: missing client_id
 			"client_secret": {"test-secret"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("mismatched_client_id", func(t *testing.T) {
 		resp := makeTokenRequest(t, url.Values{
@@ -443,9 +423,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":     {"other-client"},
 			"client_secret": {"other-secret"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("missing_client_secret", func(t *testing.T) {
 		resp := makeTokenRequest(t, url.Values{
@@ -455,9 +433,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":    {"test-client"},
 			// NOTE: missing client_secret
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("mismatched_client_secret", func(t *testing.T) {
 		resp := makeTokenRequest(t, url.Values{
@@ -467,9 +443,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":     {"test-client"},
 			"client_secret": {"invalid-secret"}, // NOTE: invalid secret
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 	t.Run("different_redirect_uri", func(t *testing.T) {
 		resp := makeTokenRequest(t, url.Values{
@@ -479,9 +453,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusBadRequest)
 	})
 
 	t.Run("code_cannot_be_redeemed_twice", func(t *testing.T) {
@@ -497,9 +469,7 @@ func TestTokenFailure(t *testing.T) {
 			"client_secret": {"test-secret"},
 		}
 		resp := makeTokenRequest(t, params)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
-		}
+		assertStatus(t, resp, http.StatusOK)
 
 		// We should have an access token in the response
 		tokenResponse := extractResponseJSON[*openidtypes.TokenResponse](t, resp)
@@ -510,11 +480,80 @@ func TestTokenFailure(t *testing.T) {
 
 		// Now, redeem the same code again
 		resp = makeTokenRequest(t, params)
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
+		assertStatus(t, resp, http.StatusBadRequest)
+	})
+}
+
+func TestUserinfoFailure(t *testing.T) {
+	idp, server := newTestServer(t)
+	client := getTestClient(t, server)
+
+	makeUserinfoRequest := func(t *testing.T, accessToken string) *http.Response {
+		req, err := http.NewRequest("GET", server.URL+"/userinfo", nil)
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
 		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("failed to initiate authorization: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+
+	t.Run("missing_access_token", func(t *testing.T) {
+		resp := makeUserinfoRequest(t, "")
+		assertStatus(t, resp, http.StatusUnauthorized)
 	})
 
+	t.Run("invalid_access_token", func(t *testing.T) {
+		resp := makeUserinfoRequest(t, "invalid-token")
+		assertStatus(t, resp, http.StatusUnauthorized)
+	})
+
+	t.Run("expired_access_token", func(t *testing.T) {
+		// Insert an expired access token into the database
+		tokenID := "test-token"
+		if err := idp.db.Write(func(d *data) error {
+			d.AccessTokens = map[string]*db.AccessToken{
+				tokenID: &db.AccessToken{
+					Token:    tokenID,
+					UserUUID: "test-user",
+					Expiry:   db.JSONTime{time.Now().Add(-1 * time.Minute)},
+				},
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("failed to write fake access token: %v", err)
+		}
+
+		// Attempt to use the expired access token
+		resp := makeUserinfoRequest(t, tokenID)
+		assertStatus(t, resp, http.StatusUnauthorized)
+	})
+
+	t.Run("access_token_for_invalid_user", func(t *testing.T) {
+		// Insert an access token for a different user
+		tokenID := "test-token"
+		if err := idp.db.Write(func(d *data) error {
+			d.AccessTokens = map[string]*db.AccessToken{
+				tokenID: &db.AccessToken{
+					Token:    tokenID,
+					UserUUID: "invalid-user",
+					Expiry:   db.JSONTime{time.Now().Add(5 * time.Minute)},
+				},
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("failed to write fake access token: %v", err)
+		}
+
+		// Attempt to use the access token
+		resp := makeUserinfoRequest(t, tokenID)
+		assertStatus(t, resp, http.StatusUnauthorized)
+	})
 }
 
 func getTestClient(tb testing.TB, server *httptest.Server) *http.Client {
@@ -568,4 +607,11 @@ func mustPostJSON[Req, Resp any](tb testing.TB, client *http.Client, path string
 	defer resp.Body.Close()
 
 	return extractResponseJSON[*Resp](tb, resp)
+}
+
+func assertStatus(tb testing.TB, r *http.Response, want int) {
+	tb.Helper()
+	if r.StatusCode != want {
+		tb.Fatalf("unexpected status code: %d, want %d", r.StatusCode, want)
+	}
 }

@@ -487,7 +487,7 @@ func (s *idpServer) serveUserinfo(w http.ResponseWriter, r *http.Request) {
 	if user == nil {
 		s.logger.Warn("user not found",
 			"token", tokenString,
-			"user_uuid", user.UUID,
+			"user_uuid", accessToken.UserUUID,
 		)
 		http.Error(w, "access token not found", http.StatusUnauthorized)
 		return
@@ -743,6 +743,9 @@ func validateRedirectURI(ru *url.URL) error {
 	}
 	if ru.Fragment != "" {
 		return fmt.Errorf("redirect_uri must not include a fragment")
+	}
+	if ru.Host == "" {
+		return fmt.Errorf("redirect_uri must include a host")
 	}
 	if ru.Scheme != "http" && ru.Scheme != "https" {
 		return fmt.Errorf("redirect_uri must be http or https")
