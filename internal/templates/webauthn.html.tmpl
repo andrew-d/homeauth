@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Webauthn Page</title>
+  <link rel="stylesheet" href="/css/milligram.min.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <style>
+    .webauthn-info {
+      border: 1px solid #ccc;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .webauthn-info > div {
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #ccc;
+    }
+    .webauthn-info > div:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="navbar">
+    <h3><a href="/">homeauth</a></h3>
+  </div>
+  <div class="container">
+    <div class="row">
+      <div class="column column-50 column-offset-25">
+        <h1>WebAuthn Information</h1>
+        <div class="webauthn-info">
+          <div class="row">
+            <div class="column column-33">
+              <strong>Email:</strong>
+            </div>
+            <div class="column">
+              <span>{{ .User.Email }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="webauthn-info">
+          <div class="row">
+            <div class="column">
+              <strong>ID</strong>
+            </div>
+            <div class="column">
+              <strong>Public Key</strong>
+            </div>
+          </div>
+          <!-- Iterate over every webauthn credential and show the user -->
+          {{ range .Credentials }}
+          <div class="row">
+            <div class="column">
+              <span>{{ .ID | printf "%x" }}</span>
+            </div>
+            <div class="column">
+              <span>{{ .PublicKey | printf "%x" }}</span>
+            </div>
+          </div>
+          {{ end }}
+        </div>
+
+        <div class="button-container">
+          <button class="button" id="register">Register New</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/webauthn.js"></script>
+  <script>
+    // Listen to the register button click event
+    document.getElementById('register').addEventListener('click', function() {
+      if (!window.PublicKeyCredential) {
+        alert("Error: this browser does not support WebAuthn");
+        return;
+      }
+
+      window.homeauth.doRegister().then(function(credential) {
+        // TODO: something smarter
+        window.location.reload();
+      }).catch(function(err) {
+        alert("Error: " + err);
+      });
+    });
+  </script>
+</body>
+</html>

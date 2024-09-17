@@ -32,6 +32,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/jordan-wright/email"
 	flag "github.com/spf13/pflag"
@@ -59,6 +60,13 @@ func main() {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 
+	// Parse our server URL to get the hostname.
+	u, err := url.Parse(*serverURL)
+	if err != nil {
+		// No point in continuing if the server URL is invalid.
+		fatal(logger, "invalid server URL", "url", *serverURL, errAttr(err))
+	}
+
 	db, err := jsonfile.Load[data](*dbPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		db, err = jsonfile.New[data](*dbPath)
@@ -69,11 +77,27 @@ func main() {
 
 	hasher := pwhash.New(2, 512*1024, 2)
 
+	wconfig := &webauthn.Config{
+		RPDisplayName: "homeauth",
+		RPID:          u.Hostname(), // Generally the FQDN for your site
+		RPOrigins: []string{
+			*serverURL,
+			// TODO: more?
+		},
+	}
+
+	webAuthn, err := webauthn.New(wconfig)
+	if err != nil {
+		fatal(logger, "failed to initialize WebAuthn", errAttr(err))
+	}
+
 	idp := &idpServer{
-		logger:    logger.With(slog.String("service", "idp")),
-		serverURL: *serverURL,
-		db:        db,
-		hasher:    hasher,
+		logger:         logger.With(slog.String("service", "idp")),
+		serverURL:      *serverURL,
+		serverHostname: u.Hostname(),
+		db:             db,
+		hasher:         hasher,
+		webAuthn:       webAuthn,
 	}
 	if err := idp.initializeConfig(); err != nil {
 		fatal(logger, "invalid configuration", errAttr(err))
@@ -131,17 +155,10 @@ type idpServer struct {
 	serverHostname string
 	db             *jsonfile.JSONFile[data]
 	hasher         *pwhash.Hasher
+	webAuthn       *webauthn.WebAuthn
 }
 
 func (s *idpServer) initializeConfig() error {
-	// Parse our server URL to get the hostname.
-	u, err := url.Parse(s.serverURL)
-	if err != nil {
-		// No point in continuing if the server URL is invalid.
-		return fmt.Errorf("invalid server URL: %w", err)
-	}
-	s.serverHostname = u.Hostname()
-
 	// Verify the config in the database.
 	var errs []error
 	s.db.Read(func(data *data) {
@@ -201,12 +218,14 @@ func (s *idpServer) httpHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(RequestLogger(s.logger))
 
+	// TODO: CSRF protection
 	// TODO: Access-Control-Allow-Origin header for certain endpoints
 
 	r.Get("/", s.serveIndex)
 	r.Get("/.well-known/jwks.json", s.serveJWKS)
 	r.Get("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
 	// TODO: webfinger for Tailscale compat?
+	// TODO: well-known/webauthn?
 
 	// OIDC IdP endpoints
 	r.Get("/authorize/public", s.serveAuthorize)
@@ -222,14 +241,25 @@ func (s *idpServer) httpHandler() http.Handler {
 	r.Get("/login", s.serveGetLogin)
 	r.Post("/login", s.servePostLogin)
 
+	// Login endpoints for magic link login
 	r.Get("/login/check-email", s.serveGetLoginCheckEmail)
 	r.Get("/login/magic", s.serveGetMagicLogin)
+
+	// Login endpoints for WebAuthn
+	r.Post("/login/webauthn", s.servePostWebAuthnLogin)
 
 	// Authenticated endpoints
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireSession(http.HandlerFunc(s.redirectToLogin)))
 
 		r.Get("/account", s.serveAccount)
+
+		// WebAuthn endpoints that require a session
+		r.Get("/account/webauthn", s.serveWebAuthn)
+		r.Post("/account/webauthn/register", s.serveWebAuthnRegister)
+		r.Post("/account/webauthn/register-complete", s.serveWebAuthnRegisterComplete)
+
+		// Logout
 		r.Post("/account/logout", s.serveLogout)
 		r.Post("/account/logout-other-sessions", s.serveLogoutOtherSessions)
 	})
@@ -1056,6 +1086,8 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		s.servePostLoginPassword(w, r, user)
 	case "email":
 		s.servePostLoginEmail(w, r, user)
+	case "webauthn":
+		s.servePostLoginWebauthn(w, r, user)
 	case "google":
 		// Not yet implemented
 		http.Error(w, "not implemented", http.StatusNotImplemented)
@@ -1387,6 +1419,26 @@ func (s *idpServer) serveLogoutOtherSessions(w http.ResponseWriter, r *http.Requ
 
 	// TODO: we should use a flash message here or something
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+func (s *idpServer) clearCookies(w http.ResponseWriter, r *http.Request) {
+	for _, cookie := range r.Cookies() {
+		s.logger.Info("clearing cookie",
+			"name", cookie.Name,
+			"value", cookie.Value,
+			"path", cookie.Path,
+		)
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookie.Name,
+			Value:    "",
+			Path:     cookie.Path,
+			Domain:   cookie.Domain,
+			MaxAge:   -1,
+			Secure:   cookie.Secure,
+			SameSite: cookie.SameSite,
+			HttpOnly: cookie.HttpOnly,
+		})
+	}
 }
 
 func randHex(n int) string {

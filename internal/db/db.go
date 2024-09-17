@@ -3,6 +3,8 @@ package db
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 // User is the type of a user in the database.
@@ -15,6 +17,10 @@ type User struct {
 	// either via logging in with a method that requires receiving an
 	// email, or via another method.
 	EmailVerified bool `json:",omitempty"`
+
+	// WebAuthnID is the user handle for WebAuthn. This is a random value
+	// of 64 bytes.
+	WebAuthnID []byte `json:",omitempty"`
 }
 
 // Session is a user session in the database.
@@ -23,6 +29,9 @@ type Session struct {
 	Expiry   JSONTime
 	UserUUID string
 	Data     map[string]any `json:",omitempty"`
+
+	// WebAuthnSession is the WebAuthn session data for this session.
+	WebAuthnSession *webauthn.SessionData `json:",omitempty"`
 }
 
 // OAuthCode is a code for the OAuth2 authorization code flow.
@@ -84,6 +93,15 @@ type MagicLoginLink struct {
 	Expiry   JSONTime
 	UserUUID string
 	NextURL  string `json:",omitempty"` // optional URL to redirect to after login
+}
+
+// WebAuthnCredential is a WebAuthn credential for a user.
+type WebAuthnCredential struct {
+	// Embed the type from the WebAuthn library.
+	webauthn.Credential
+
+	// UserUUID is the UUID of the user that this credential is for.
+	UserUUID string
 }
 
 // JSONTime is a time.Time wrapper that serializes to/from JSON as a Unix

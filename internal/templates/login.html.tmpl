@@ -49,12 +49,15 @@
               
               <label for="password">Password</label>
               <input type="password" name="password" placeholder="Enter your password">
+
+              <input type="hidden" name="webauthn_response" id="webauthn-response" value="">
             </fieldset>
           </form>
         </div>
 
         <div class="button-container">
           <button type="submit" class="button" form="login" name="via" value="password">Log In</button>
+          <button class="button" name="via" id="webauthn">Passkey</button>
           <button type="submit" class="button" form="login" name="via" value="email">Log In Via Email</button>
           <button type="submit" class="button button-outline" form="login" name="via" value="google">Log in with Google</button>
         </div>
@@ -62,5 +65,23 @@
     </div>
   </div>
 
+  <script src="/js/webauthn.js"></script>
+  <script>
+    // Listen to the login button click event
+    document.getElementById('webauthn').addEventListener('click', function() {
+      if (!window.PublicKeyCredential) {
+        alert("Error: this browser does not support WebAuthn");
+        return;
+      }
+
+      window.homeauth.doLogin().then((cred) => {
+        // Update the form field with the credential response and submit it.
+        document.getElementById('webauthn-response').value = JSON.stringify(cred);
+        document.getElementById('login').submit();
+      }).catch((err) => {
+        alert("Error: " + err);
+      });
+    });
+  </script>
 </body>
 </html>
