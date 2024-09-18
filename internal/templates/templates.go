@@ -3,7 +3,13 @@ package templates
 import (
 	"embed"
 	"html/template"
+	"log"
+	"os"
+	"path/filepath"
 	"sync"
+
+	"github.com/andrew-d/homeauth/internal/buildtags"
+	"github.com/andrew-d/homeauth/internal/repodir"
 )
 
 //go:embed *.html.tmpl
@@ -13,13 +19,10 @@ var (
 	all     *template.Template
 	allErr  error
 	allOnce sync.Once
-
-	// If this is non-nil, it's called before calling allEmbedded.
-	allDev func() *template.Template
 )
 
 func All() *template.Template {
-	if allDev != nil {
+	if buildtags.IsDev {
 		if t := allDev(); t != nil {
 			return t
 		}
@@ -37,4 +40,17 @@ func allEmbedded() *template.Template {
 		panic(allErr)
 	}
 	return all
+}
+
+func allDev() *template.Template {
+	root, err := repodir.Root()
+	if err != nil {
+		wd, _ := os.Getwd()
+		log.Printf("could not find templates directory on disk; working directory is %s", wd)
+		return nil
+	}
+
+	// Load the templates from disk.
+	templateDir := filepath.Join(root, "internal", "templates")
+	return template.Must(template.ParseGlob(filepath.Join(templateDir, "*.html.tmpl")))
 }
