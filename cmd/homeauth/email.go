@@ -244,46 +244,48 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO; there's a race here where multiple uses of the same magic link
-	// can happen at once; need to fix that.
+	// NOTE: because we want to ensure that a magic link is single-use, we
+	// do the entire operation here inside a write transaction. This
+	// ensures that nothing else can use the magic link while we're
+	// processing it or after we've used it.
+	//
+	// Because of this, we shouldn't be writing to the client while holding
+	// the lock; store any errors in an error variable and write them after
+	// we're done.
 	var (
 		magic *db.MagicLoginLink
 		user  *db.User
+
+		status    int
+		errString string
 	)
-	s.db.Read(func(data *data) {
-		magic = data.MagicLinks[token]
-		if magic != nil {
-			user = data.Users[magic.UserUUID]
-		}
-	})
-	if magic == nil {
-		s.logger.Warn("no such magic login", "token", token)
-		http.Error(w, "invalid token", http.StatusUnauthorized)
-		return
-	}
-	if user == nil {
-		s.logger.Error("no such user for magic login", "token", token, "user_uuid", magic.UserUUID)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	// Check that the token hasn't expired.
-	if time.Now().After(magic.Expiry.Time) {
-		s.logger.Warn("magic login expired", "token", token, "expiry", magic.Expiry, "now", time.Now())
-		http.Error(w, "invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	// Log the user in by creating a session.
-	if err := s.loginUserSession(w, r, user, "magic_link"); err != nil {
-		s.logger.Error("failed to log in user", errAttr(err))
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
 	if err := s.db.Write(func(data *data) error {
+		magic = data.MagicLinks[token]
+		if magic == nil {
+			s.logger.Warn("no such magic login", "token", token)
+			status = http.StatusUnauthorized
+			errString = "invalid token"
+			return nil
+		}
+
+		user = data.Users[magic.UserUUID]
+		if user == nil {
+			s.logger.Error("no such user for magic login", "token", token, "user_uuid", magic.UserUUID)
+			status = http.StatusInternalServerError
+			errString = "internal server error"
+			return nil
+		}
+
+		// Check that the token hasn't expired.
+		if time.Now().After(magic.Expiry.Time) {
+			s.logger.Warn("magic login expired", "token", token, "expiry", magic.Expiry, "now", time.Now())
+			status = http.StatusUnauthorized
+			errString = "expired token"
+			return nil
+		}
+
 		// Remove the magic login link from the database, now that it's
-		// been used; TODO see above with a race
+		// been used.
 		delete(data.MagicLinks, token)
 
 		// Update this user's EmailVerified field; now that they've
@@ -294,6 +296,24 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		s.logger.Error("failed to update database after login", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// First check if we had an error during the write transaction.
+	if status != 0 {
+		http.Error(w, errString, status)
+		return
+	}
+	if user == nil {
+		s.logger.Error("no user found after magic login", "token", token)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Log the user in by creating a session.
+	if err := s.loginUserSession(w, r, user, "magic_link"); err != nil {
+		s.logger.Error("failed to log in user", errAttr(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 

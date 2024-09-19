@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
@@ -13,11 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neilotoole/slogt"
+	"golang.org/x/net/publicsuffix"
+
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/pwhash"
-	"github.com/neilotoole/slogt"
 )
 
 type lazyHandler struct {
@@ -564,6 +567,15 @@ func TestUserinfoFailure(t *testing.T) {
 }
 
 func getTestClient(tb testing.TB, server *httptest.Server) *http.Client {
+	tb.Helper()
+
+	jar, err := cookiejar.New(&cookiejar.Options{
+		PublicSuffixList: publicsuffix.List,
+	})
+	if err != nil {
+		tb.Fatalf("failed to create cookie jar: %v", err)
+	}
+
 	client := server.Client()
 
 	// We never want the client to follow redirects, as we want to see the
@@ -572,6 +584,7 @@ func getTestClient(tb testing.TB, server *httptest.Server) *http.Client {
 		tb.Logf("not following redirect: %v", req.URL)
 		return http.ErrUseLastResponse
 	}
+	client.Jar = jar
 	return client
 }
 
