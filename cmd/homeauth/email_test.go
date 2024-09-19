@@ -153,6 +153,63 @@ func TestMagicLinkLoginExpired(t *testing.T) {
 	}
 }
 
+func TestLogoutRemovesMagicLoginLinks(t *testing.T) {
+	idp, server := newTestServer(t)
+	client := getTestClient(t, server)
+
+	for _, endpoint := range []string{
+		"/account/logout",
+		"/account/logout-other-sessions",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			// Create a fake session for a user and verify it works.
+			const username = "test-user"
+			req, err := http.NewRequest("GET", server.URL+"/account", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			u, _ := url.Parse(server.URL)
+			sessionCookie := makeFakeSession(t, idp, username)
+			client.Jar.SetCookies(u, []*http.Cookie{sessionCookie})
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			assertStatus(t, resp, http.StatusOK)
+
+			// Now create a new magic link for the user.
+			resp, err = client.PostForm(server.URL+"/login?next=/account", url.Values{
+				"username": {"andrew@du.nham.ca"},
+				"via":      {"email"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			assertStatus(t, resp, http.StatusSeeOther)
+
+			// Log out the user.
+			resp, err = client.Post(server.URL+endpoint, "application/x-www-form-urlencoded", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			assertStatus(t, resp, http.StatusSeeOther)
+
+			// Verify that the magic link is gone.
+			idp.db.Read(func(d *data) {
+				if len(d.MagicLinks) != 0 {
+					t.Errorf("expected no magic links, got %d", len(d.MagicLinks))
+				}
+			})
+		})
+	}
+}
+
 func extractMagicLink(tb testing.TB, body string) string {
 	tb.Helper()
 

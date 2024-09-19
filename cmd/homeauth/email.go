@@ -288,6 +288,9 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 		// been used.
 		delete(data.MagicLinks, token)
 
+		// TODO(andrew-d): should we remove all other magic links for
+		// this user?
+
 		// Update this user's EmailVerified field; now that they've
 		// logged in via an email link, we know they control that email
 		// address.

@@ -663,14 +663,22 @@ func (s *idpServer) serveLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete all sessions for the current user.
 	s.db.Write(func(data *data) error {
+		// Delete all sessions for the current user.
 		for _, session := range data.Sessions {
 			if session.UserUUID != currSession.UserUUID {
 				continue
 			}
 			delete(data.Sessions, session.ID)
 		}
+
+		// Remove all magic login links for the user.
+		for token, ml := range data.MagicLinks {
+			if ml.UserUUID == currSession.UserUUID {
+				delete(data.MagicLinks, token)
+			}
+		}
+
 		return nil
 	})
 
@@ -700,6 +708,13 @@ func (s *idpServer) serveLogoutOtherSessions(w http.ResponseWriter, r *http.Requ
 			}
 			if session.ID != currSession.ID {
 				delete(data.Sessions, session.ID)
+			}
+		}
+
+		// Remove all magic login links for the user.
+		for token, ml := range data.MagicLinks {
+			if ml.UserUUID == currSession.UserUUID {
+				delete(data.MagicLinks, token)
 			}
 		}
 		return nil
