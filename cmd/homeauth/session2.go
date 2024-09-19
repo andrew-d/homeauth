@@ -55,6 +55,9 @@ func (s *sessionManager) newSession(f func(*db.Session)) (*db.Session, error) {
 	f(session)
 
 	if err := s.db.Write(func(d *data) error {
+		if d.Sessions == nil {
+			d.Sessions = make(map[string]*db.Session)
+		}
 		d.Sessions[session.ID] = session
 		return nil
 	}); err != nil {

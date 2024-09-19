@@ -49,7 +49,7 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 				Email: "andrew@du.nham.ca",
 			},
 		}
-		d.Clients = map[string]*db.Client{
+		d.Config.Clients = map[string]*db.Client{
 			"test-client": &db.Client{
 				ClientID:     "test-client",
 				ClientSecret: "test-secret",
@@ -70,11 +70,18 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 	srv := httptest.NewServer(lhandler)
 	tb.Cleanup(srv.Close)
 
+	smgr := &sessionManager{
+		db:      database,
+		timeNow: time.Now,
+	}
+
 	idp := &idpServer{
-		logger:    slogt.New(tb),
-		serverURL: srv.URL,
-		db:        database,
-		hasher:    pwhash.New(2, 512*1024, 2),
+		logger:         slogt.New(tb),
+		serverURL:      srv.URL,
+		serverHostname: "localhost",
+		sessions:       smgr,
+		db:             database,
+		hasher:         pwhash.New(2, 512*1024, 2),
 	}
 	if err := idp.initializeConfig(); err != nil {
 		tb.Fatalf("failed to initialize config: %v", err)
@@ -569,6 +576,7 @@ func getTestClient(tb testing.TB, server *httptest.Server) *http.Client {
 }
 
 func mustGetJSON[T any](tb testing.TB, client *http.Client, path string) *T {
+	tb.Helper()
 	resp, err := client.Get(path)
 	if err != nil {
 		tb.Fatalf("failed to get %s: %v", path, err)
@@ -579,6 +587,7 @@ func mustGetJSON[T any](tb testing.TB, client *http.Client, path string) *T {
 }
 
 func extractResponseJSON[T any](tb testing.TB, resp *http.Response) T {
+	tb.Helper()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		tb.Fatalf("unexpected status code: %d", resp.StatusCode)
 	}
