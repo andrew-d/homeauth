@@ -26,12 +26,35 @@ type User struct {
 // Session is a user session in the database.
 type Session struct {
 	ID       string
-	Expiry   JSONTime
 	UserUUID string
 	Data     map[string]any `json:",omitempty"`
 
+	// Expiry is the time that the session expires and is no longer valid;
+	// it is used both to clean up old sessions from the database, and to
+	// enforce session timeouts on the client by expiring the session cookie.
+	//
+	// Sessions that are ephemeral have no explicit expiry time, and the
+	// Expiry field is the zero value.
+	Expiry JSONTime `json:",omitempty"`
+
+	// IsEphemeral is whether this session is ephemeral; i.e. should not be
+	// persisted by the client, and should be deleted when the browser is
+	// closed. These sessions are removed from the database upon boot, or
+	// if they haven't seen activity in a while.
+	IsEphemeral bool `json:",omitempty"`
+
+	// LastActivity is the last time that this session was used. This is
+	// updated on every request, but no more than once every minute.
+	LastActivity JSONTime
+
 	// WebAuthnSession is the WebAuthn session data for this session.
 	WebAuthnSession *webauthn.SessionData `json:",omitempty"`
+}
+
+// IsAuthenticated returns whether the given Session represents an
+// authenticated user.
+func (s *Session) IsAuthenticated() bool {
+	return s.UserUUID != ""
 }
 
 // OAuthCode is a code for the OAuth2 authorization code flow.

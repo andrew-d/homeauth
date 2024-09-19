@@ -66,7 +66,7 @@
     // Un-base64 the challenge and user ID
     data.publicKey.challenge = base64ToUint8Array(data.publicKey.challenge);
 
-    if (data.publicKey.user.id) {
+    if (data.publicKey.user && data.publicKey.user.id) {
       data.publicKey.user.id = base64ToUint8Array(data.publicKey.user.id);
     }
 
@@ -165,14 +165,16 @@
       });
   }
 
-  function doLogin() {
+  function doLogin(username) {
     // Call the register endpoint to get the credential options
     const prom = fetch('/login/webauthn', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({})
+      body: JSON.stringify({
+        username: username,
+      }),
     });
 
     return prom

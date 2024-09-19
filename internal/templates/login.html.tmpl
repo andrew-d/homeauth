@@ -57,7 +57,7 @@
 
         <div class="button-container">
           <button type="submit" class="button" form="login" name="via" value="password">Log In</button>
-          <button class="button" name="via" id="webauthn">Passkey</button>
+          <button class="button" id="webauthn">Passkey</button>
           <button type="submit" class="button" form="login" name="via" value="email">Log In Via Email</button>
           <button type="submit" class="button button-outline" form="login" name="via" value="google">Log in with Google</button>
         </div>
@@ -74,9 +74,21 @@
         return;
       }
 
-      window.homeauth.doLogin().then((cred) => {
+      // Get the entered username (email address).
+      const username = document.querySelector('input[name="username"]').value;
+
+      window.homeauth.doLogin(username).then((cred) => {
         // Update the form field with the credential response and submit it.
         document.getElementById('webauthn-response').value = JSON.stringify(cred);
+
+        // We need a 'via' field to tell the server that this is a WebAuthn
+        // login. Create an element named that and append it to the form before submitting.
+        const via = document.createElement('input');
+        via.type = 'hidden';
+        via.name = 'via';
+        via.value = 'webauthn';
+        document.getElementById('login').appendChild(via);
+
         document.getElementById('login').submit();
       }).catch((err) => {
         alert("Error: " + err);

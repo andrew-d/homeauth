@@ -81,10 +81,10 @@
         return;
       }
 
-      window.homeauth.doRegister().then(function(credential) {
+      window.homeauth.doRegister().then((credential) => {
         // TODO: something smarter
         window.location.reload();
-      }).catch(function(err) {
+      }).catch((err) => {
         alert("Error: " + err);
       });
     });

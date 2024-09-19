@@ -4,16 +4,32 @@ import "github.com/andrew-d/homeauth/internal/db"
 
 type data struct {
 	// Parts of the data model
-	Users         map[string]*db.User                 // keyed by User.UUID
-	Sessions      map[string]*db.Session              // keyed by Session.ID
-	OAuthCodes    map[string]*db.OAuthCode            // keyed by OAuthCode.Code
-	Clients       map[string]*db.Client               // keyed by Client.ClientID
 	AccessTokens  map[string]*db.AccessToken          // keyed by AccessToken.Token
 	MagicLinks    map[string]*db.MagicLoginLink       // keyed by MagicLoginLink.Token
+	OAuthCodes    map[string]*db.OAuthCode            // keyed by OAuthCode.Code
+	Sessions      map[string]*db.Session              // keyed by Session.ID
+	Users         map[string]*db.User                 // keyed by User.UUID
 	WebAuthnCreds map[string][]*db.WebAuthnCredential // keyed by User.UUID
 
-	// Cryptographic key(s) and secrets.
+	// Configuration
+	Config config
+}
 
+func (d *data) userByEmail(email string) *db.User {
+	// This is slow but fine for now since we don't have many users.
+	for _, u := range d.Users {
+		if u.Email == email {
+			return u
+		}
+	}
+	return nil
+}
+
+type config struct {
+	// Which OIDC clients are allowed to use this server.
+	Clients map[string]*db.Client // keyed by Client.ClientID
+
+	// Cryptographic key(s) and secrets.
 	PrimarySigningKeyID string
 	SigningKeys         map[string]*db.SigningKey // keyed by SigningKey.ID
 

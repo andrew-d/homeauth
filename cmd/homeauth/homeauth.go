@@ -28,7 +28,6 @@ import (
 	"text/template"
 	"time"
 
-	"crawshaw.dev/jsonfile"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -39,6 +38,7 @@ import (
 
 	"github.com/andrew-d/homeauth/internal/buildtags"
 	"github.com/andrew-d/homeauth/internal/db"
+	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
@@ -77,6 +77,11 @@ func main() {
 
 	hasher := pwhash.New(2, 512*1024, 2)
 
+	smgr := &sessionManager{
+		db:      db,
+		timeNow: time.Now,
+	}
+
 	wconfig := &webauthn.Config{
 		RPDisplayName: "homeauth",
 		RPID:          u.Hostname(), // Generally the FQDN for your site
@@ -95,6 +100,7 @@ func main() {
 		logger:         logger.With(slog.String("service", "idp")),
 		serverURL:      *serverURL,
 		serverHostname: u.Hostname(),
+		sessions:       smgr,
 		db:             db,
 		hasher:         hasher,
 		webAuthn:       webAuthn,
@@ -154,6 +160,7 @@ type idpServer struct {
 	serverURL      string
 	serverHostname string
 	db             *jsonfile.JSONFile[data]
+	sessions       *sessionManager
 	hasher         *pwhash.Hasher
 	webAuthn       *webauthn.WebAuthn
 }
@@ -162,7 +169,7 @@ func (s *idpServer) initializeConfig() error {
 	// Verify the config in the database.
 	var errs []error
 	s.db.Read(func(data *data) {
-		if e := data.Email; e != nil {
+		if e := data.Config.Email; e != nil {
 			// Verify that the SMTP server is a valid host:port.
 			if e.SMTPServer == "" {
 				errs = append(errs, errors.New("missing SMTP server"))
@@ -189,9 +196,9 @@ func (s *idpServer) printConfig() {
 	s.db.Read(func(data *data) {
 		s.logger.Info("IdP database",
 			"num_users", len(data.Users),
-			"num_clients", len(data.Clients),
+			"num_clients", len(data.Config.Clients),
 		)
-		for clientID, client := range data.Clients {
+		for clientID, client := range data.Config.Clients {
 			s.logger.Debug("client",
 				"name", client.Name,
 				"client_id", clientID,
@@ -200,9 +207,9 @@ func (s *idpServer) printConfig() {
 		}
 
 		s.logger.Info("IdP cryptographic keys",
-			"primary_signing_key", data.PrimarySigningKeyID,
+			"primary_signing_key", data.Config.PrimarySigningKeyID,
 		)
-		if e := data.Email; e != nil {
+		if e := data.Config.Email; e != nil {
 			s.logger.Info("IdP email configuration",
 				"from_address", e.FromAddress,
 				"smtp_server", e.SMTPServer,
@@ -217,6 +224,43 @@ func (s *idpServer) printConfig() {
 func (s *idpServer) httpHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(RequestLogger(s.logger))
+
+	// Ensure that all requests have a valid session cookie, since we use
+	// this to store data for e.g. passkeys.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			now := time.Now()
+
+			session, err := s.sessions.ensureSession(w, r, func(session *db.Session) {
+				// Unauthenticated sessions expire when the
+				// browser is closed, so we don't set the
+				// Expiry value.
+				session.IsEphemeral = true
+				session.LastActivity = db.JSONTime{now}
+			})
+			if err != nil {
+				s.logger.Error("failed to ensure session", errAttr(err))
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+
+			// If the last activity was more than a minute ago, update it.
+			if now.Sub(session.LastActivity.Time) > 1*time.Minute {
+				if err := s.db.Write(func(data *data) error {
+					session = data.Sessions[session.ID] // re-load from the database
+					session.LastActivity = db.JSONTime{time.Now()}
+					return nil
+				}); err != nil {
+					s.logger.Error("failed to update session activity", errAttr(err))
+					// non-fatal; continue
+				}
+			}
+
+			// Now that we know we have a session, add it to the request context.
+			ctx := context.WithValue(r.Context(), sessionCtxKey, session)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 
 	// TODO: CSRF protection
 	// TODO: Access-Control-Allow-Origin header for certain endpoints
@@ -246,11 +290,11 @@ func (s *idpServer) httpHandler() http.Handler {
 	r.Get("/login/magic", s.serveGetMagicLogin)
 
 	// Login endpoints for WebAuthn
-	r.Post("/login/webauthn", s.servePostWebAuthnLogin)
+	r.Post("/login/webauthn", s.serveWebauthnBeginLogin)
 
 	// Authenticated endpoints
 	r.Group(func(r chi.Router) {
-		r.Use(s.requireSession(http.HandlerFunc(s.redirectToLogin)))
+		r.Use(s.requireLogin(http.HandlerFunc(s.redirectToLogin)))
 
 		r.Get("/account", s.serveAccount)
 
@@ -330,7 +374,8 @@ func parseRSASigningKey(key *db.SigningKey) (keyID uint64, pkey *rsa.PrivateKey,
 func (s *idpServer) getJWKS() (keyID uint64, pkey *rsa.PrivateKey, err error) {
 	var key *db.SigningKey
 	s.db.Read(func(data *data) {
-		key = data.SigningKeys[data.PrimarySigningKeyID]
+		conf := data.Config
+		key = conf.SigningKeys[conf.PrimarySigningKeyID]
 	})
 
 	if key != nil {
@@ -343,8 +388,10 @@ func (s *idpServer) getJWKS() (keyID uint64, pkey *rsa.PrivateKey, err error) {
 	}
 
 	err = s.db.Write(func(data *data) error {
+		conf := &data.Config
+
 		// Re-check the key in case it was created while we were reading.
-		key = data.SigningKeys[data.PrimarySigningKeyID]
+		key = conf.SigningKeys[conf.PrimarySigningKeyID]
 		if key != nil {
 			keyID, pkey, err = parseRSASigningKey(key)
 			if err == nil {
@@ -374,12 +421,12 @@ func (s *idpServer) getJWKS() (keyID uint64, pkey *rsa.PrivateKey, err error) {
 		s.logger.Info("generated new RSA key", "keyID", keyID)
 
 		// Store in data for future use.
-		data.PrimarySigningKeyID = fmt.Sprint(keyID)
-		if data.SigningKeys == nil {
-			data.SigningKeys = make(map[string]*db.SigningKey)
+		conf.PrimarySigningKeyID = fmt.Sprint(keyID)
+		if conf.SigningKeys == nil {
+			conf.SigningKeys = make(map[string]*db.SigningKey)
 		}
-		data.SigningKeys[data.PrimarySigningKeyID] = &db.SigningKey{
-			ID:        data.PrimarySigningKeyID,
+		conf.SigningKeys[conf.PrimarySigningKeyID] = &db.SigningKey{
+			ID:        conf.PrimarySigningKeyID,
 			Algorithm: "RS256",
 			Key:       x509.MarshalPKCS1PrivateKey(pkey),
 		}
@@ -639,14 +686,14 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Okay, we successfully validated the request parameters. Now, see if
 	// we have a user logged in.
+	session, ok := s.sessions.getSession(r)
+
 	var (
 		user   *db.User
 		client *db.Client
 	)
 	s.db.Read(func(data *data) {
-		client = data.Clients[clientID]
-
-		session, ok := s.getSession(data, r)
+		client = data.Config.Clients[clientID]
 		if ok {
 			user, ok = data.Users[session.UserUUID]
 			if !ok {
@@ -811,7 +858,7 @@ func (s *idpServer) serveToken(w http.ResponseWriter, r *http.Request) {
 		code = data.OAuthCodes[codeID]
 		if code != nil {
 			user = data.Users[code.UserUUID]
-			client = data.Clients[code.ClientID]
+			client = data.Config.Clients[code.ClientID]
 		}
 	})
 	if code == nil || user == nil {
@@ -1066,13 +1113,7 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 	// Load the user by their email address.
 	var user *db.User
 	s.db.Read(func(data *data) {
-		// This is slow but fine for now since we don't have many users.
-		for _, u := range data.Users {
-			if u.Email == username {
-				user = u
-				return
-			}
-		}
+		user = data.userByEmail(username)
 	})
 	if user == nil {
 		s.logger.Info("no such user", "username", username)
@@ -1115,6 +1156,29 @@ func (s *idpServer) getNextURL(r *http.Request) string {
 	return nextURL
 }
 
+// loginUserSession logs in a user by creating a session for them. It ignores
+// any existing session on the request.
+func (s *idpServer) loginUserSession(w http.ResponseWriter, r *http.Request, user *db.User, method string) error {
+	session, err := s.sessions.newSession(func(session *db.Session) {
+		session.UserUUID = user.UUID
+		session.Expiry = db.JSONTime{time.Now().Add(7 * 24 * time.Hour)}
+	})
+	if err != nil {
+		return err
+	}
+
+	// Store the session in a cookie.
+	s.sessions.writeSessionCookie(w, r, session)
+
+	s.logger.Info("logged in user",
+		"username", user.Email,
+		"user_uuid", user.UUID,
+		"session_id", session.ID,
+		"login_method", method,
+	)
+	return nil
+}
+
 func (s *idpServer) servePostLoginPassword(w http.ResponseWriter, r *http.Request, user *db.User) {
 	password := r.FormValue("password")
 	if !s.hasher.Verify([]byte(password), []byte(user.PasswordHash)) {
@@ -1124,21 +1188,11 @@ func (s *idpServer) servePostLoginPassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Log the user in by creating a session.
-	session := &db.Session{
-		UserUUID: user.UUID,
-		Expiry:   db.JSONTime{time.Now().Add(7 * 24 * time.Hour)},
-	}
-	if err := s.putSession(w, r, session); err != nil {
-		// callee has already logged
+	if err := s.loginUserSession(w, r, user, "password"); err != nil {
+		s.logger.Error("failed to log in user", errAttr(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	s.logger.Info("logged in user",
-		"username", user.Email,
-		"user_uuid", user.UUID,
-		"session_id", session.ID,
-	)
 
 	http.Redirect(w, r, s.getNextURL(r), http.StatusSeeOther)
 }
@@ -1154,7 +1208,7 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 
 	var emailConfig *EmailConfig
 	if err := s.db.Write(func(data *data) error {
-		emailConfig = data.Email
+		emailConfig = data.Config.Email
 		if data.MagicLinks == nil {
 			data.MagicLinks = make(map[string]*db.MagicLoginLink)
 		}
@@ -1286,12 +1340,8 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log the user in by creating a session.
-	session := &db.Session{
-		UserUUID: user.UUID,
-		Expiry:   db.JSONTime{time.Now().Add(7 * 24 * time.Hour)},
-	}
-	if err := s.putSession(w, r, session); err != nil {
-		// callee has already logged
+	if err := s.loginUserSession(w, r, user, "magic_link"); err != nil {
+		s.logger.Error("failed to log in user", errAttr(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -1312,9 +1362,8 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("logged in user via magic link",
-		"user_uuid", magic.UserUUID,
-		"session_id", session.ID,
+	s.logger.Debug("redirecting user after magic login",
+		"user_uuid", user.UUID,
 		"next_url", magic.NextURL,
 	)
 
@@ -1345,7 +1394,7 @@ func (s *idpServer) addUser(ctx context.Context, email, password string) error {
 }
 
 func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
-	user := s.mustUserFromContext(r.Context())
+	user := s.mustUser(r.Context())
 
 	var (
 		numSessions int

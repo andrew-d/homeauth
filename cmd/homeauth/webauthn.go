@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -13,15 +15,44 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
-func (s *idpServer) servePostWebAuthnLogin(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	user := s.mustUserFromContext(ctx)
-	session, _ := s.sessionFromContext(ctx)
-
-	var wuser *webAuthnUser
-	s.db.Read(func(data *data) {
-		wuser = s.makeWebAuthnUser(data, user)
+func (s *idpServer) serveWebauthnBeginLogin(w http.ResponseWriter, r *http.Request) {
+	// Use sessionFromContextOpts to allow unauthenticated sessions.
+	session, ok := s.sessionFromContextOpts(r.Context(), sessionFromContextOpts{
+		AllowUnauthenticated: true,
 	})
+	if !ok {
+		panic("expected unauthenticated session to exist")
+	}
+
+	s.logger.Debug("beginning WebAuthn login",
+		"unauthenticated_session_id", session.ID,
+	)
+
+	var requestBody struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		s.logger.Error("failed to decode request body", errAttr(err))
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Load the user from the database.
+	var (
+		user  *db.User
+		wuser *webAuthnUser
+	)
+	s.db.Read(func(data *data) {
+		user = data.userByEmail(requestBody.Username)
+		if user != nil {
+			wuser = s.makeWebAuthnUser(data, user)
+		}
+	})
+	if user == nil {
+		s.logger.Error("user not found", "username", requestBody.Username)
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
 
 	options, sessionData, err := s.webAuthn.BeginLogin(wuser)
 	if err != nil {
@@ -51,13 +82,39 @@ func (s *idpServer) servePostWebAuthnLogin(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *idpServer) servePostLoginWebauthn(w http.ResponseWriter, r *http.Request, user *db.User) {
-	var wuser *webAuthnUser
+	// Use sessionFromContextOpts to allow unauthenticated sessions.
+	session, ok := s.sessionFromContextOpts(r.Context(), sessionFromContextOpts{
+		AllowUnauthenticated: true,
+	})
+	if !ok {
+		panic("expected unauthenticated session to exist")
+	}
+
+	s.logger.Debug("finishing WebAuthn login",
+		"unauthenticated_session_id", session.ID,
+		"user", user.Email,
+		"session_has_webauthn", session.WebAuthnSession != nil,
+	)
+
+	// If this session doesn't have a WebAuthn session, something is wrong;
+	// just redirect the user back to the login page (while preserving the 'next' URL parameter).
+	if session.WebAuthnSession == nil {
+		vals := url.Values{}
+		if nn := r.FormValue("next"); nn != "" {
+			vals.Set("next", nn)
+		}
+
+		s.logger.Warn("session missing WebAuthn session; redirecting to login")
+		http.Redirect(w, r, "/login?="+vals.Encode(), http.StatusSeeOther)
+		return
+	}
+
+	var (
+		wuser *webAuthnUser
+	)
 	s.db.Read(func(data *data) {
 		wuser = s.makeWebAuthnUser(data, user)
 	})
-
-	// TODO: need to load the session from somewhere; we don't have one if we're not authenticated
-	var session webauthn.SessionData
 
 	// NOTE: We can't use webauthn.FinishLogin here because it requires a
 	// raw *http.Request and decodes the response from the body. However,
@@ -77,7 +134,7 @@ func (s *idpServer) servePostLoginWebauthn(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	cred, err := s.webAuthn.ValidateLogin(wuser, session, par)
+	cred, err := s.webAuthn.ValidateLogin(wuser, *session.WebAuthnSession, par)
 	if err != nil {
 		s.logger.Error("failed to validate webauthn response", errAttr(err))
 		http.Error(w, "invalid webauthn_response", http.StatusBadRequest)
@@ -100,24 +157,33 @@ func (s *idpServer) servePostLoginWebauthn(w http.ResponseWriter, r *http.Reques
 				return nil
 			}
 		}
-		return nil
+
+		// If we didn't find the credential, something is wrong.
+		return fmt.Errorf("credential with ID %x not found", cred.ID)
 	}); err != nil {
 		s.logger.Error("failed to update credential", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// All good!
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
-		s.logger.Error("failed to encode response", errAttr(err))
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	// Log the user in by creating a session.
+	if err := s.loginUserSession(w, r, user, "webauthn"); err != nil {
+		s.logger.Error("failed to log in user", errAttr(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Invalidate and remove the old (unauthenticated) session.
+	if err := s.sessions.invalidateSession(r); err != nil {
+		// Not a critical error; just log it.
+		s.logger.Error("failed to invalidate old session", errAttr(err))
+	}
+
+	http.Redirect(w, r, s.getNextURL(r), http.StatusSeeOther)
 }
 
 func (s *idpServer) serveWebAuthn(w http.ResponseWriter, r *http.Request) {
-	user := s.mustUserFromContext(r.Context())
+	user := s.mustUser(r.Context())
 
 	// Show all webauthn credentials to the user
 	var creds []*db.WebAuthnCredential
@@ -140,7 +206,7 @@ func (s *idpServer) serveWebAuthnRegister(w http.ResponseWriter, r *http.Request
 	// WebAuthn data). We know these exist because we're after a middleware
 	// that requires them.
 	ctx := r.Context()
-	user := s.mustUserFromContext(ctx)
+	user := s.mustUser(ctx)
 	session, _ := s.sessionFromContext(ctx)
 
 	// If the user doesn't have a WebAuthnID yet, generate one.
@@ -204,7 +270,7 @@ func (s *idpServer) serveWebAuthnRegister(w http.ResponseWriter, r *http.Request
 
 func (s *idpServer) serveWebAuthnRegisterComplete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	user := s.mustUserFromContext(ctx)
+	user := s.mustUser(ctx)
 	session, _ := s.sessionFromContext(ctx)
 
 	wuser := &webAuthnUser{user: user}
@@ -235,6 +301,7 @@ func (s *idpServer) serveWebAuthnRegisterComplete(w http.ResponseWriter, r *http
 		}
 		data.WebAuthnCreds[user.UUID] = append(data.WebAuthnCreds[user.UUID], &db.WebAuthnCredential{
 			Credential: *cred, // TODO: don't love the * here
+			UserUUID:   user.UUID,
 		})
 		return nil
 	}); err != nil {

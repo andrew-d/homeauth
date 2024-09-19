@@ -30,6 +30,12 @@ func (s *idpServer) runCleaners(ctx context.Context) {
 		s.logger.Error("error cleaning on startup", errAttr(err))
 	}
 
+	// Do an initial clean of the sessions database to remove any ephemeral
+	// sessions.
+	if err := s.cleanEphemeralSessions(ctx); err != nil {
+		s.logger.Error("error cleaning ephemeral sessions", errAttr(err))
+	}
+
 	var wg sync.WaitGroup
 
 	wg.Add(4)
@@ -67,17 +73,52 @@ func (s *idpServer) cleanPeriodically(ctx context.Context, wg *sync.WaitGroup, n
 }
 
 func (s *idpServer) cleanSessions(ctx context.Context, now time.Time, d *data) error {
-	var cleaned int
+	hourAgo := now.Add(-1 * time.Hour)
+
+	var (
+		cleaned         int
+		cleanedActivity int
+	)
 	for id, sess := range d.Sessions {
-		if sess.Expiry.Before(now) {
-			delete(d.Sessions, id)
-			cleaned++
+		if sess.IsEphemeral {
+			// Only clean ephemeral sessions based on their last activity.
+			if sess.LastActivity.Before(hourAgo) {
+				delete(d.Sessions, id)
+				cleanedActivity++
+				continue
+			}
+		} else {
+			// Clean all non-ephemeral sessions based on their expiry.
+			if sess.Expiry.Before(now) {
+				delete(d.Sessions, id)
+				cleaned++
+				continue
+			}
 		}
 	}
 	if cleaned > 0 {
-		s.logger.Debug("cleaned expired sessions", "count", cleaned)
+		s.logger.Debug("cleaned expired sessions",
+			"num_cleaned", cleaned,
+			"num_inactive", cleanedActivity,
+		)
 	}
 	return nil
+}
+
+func (s *idpServer) cleanEphemeralSessions(ctx context.Context) error {
+	return s.db.Write(func(d *data) error {
+		var cleaned int
+		for id, sess := range d.Sessions {
+			if sess.IsEphemeral {
+				delete(d.Sessions, id)
+				cleaned++
+			}
+		}
+		if cleaned > 0 {
+			s.logger.Debug("cleaned ephemeral sessions", "count", cleaned)
+		}
+		return nil
+	})
 }
 
 func (s *idpServer) cleanOAuthCodes(ctx context.Context, now time.Time, d *data) error {

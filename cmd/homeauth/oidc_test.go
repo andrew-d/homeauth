@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"crawshaw.dev/jsonfile"
 	"github.com/andrew-d/homeauth/internal/db"
+	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/pwhash"
 	"github.com/neilotoole/slogt"
