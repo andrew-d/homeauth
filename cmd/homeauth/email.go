@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,11 +13,154 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/jordan-wright/email"
+	xmaps "golang.org/x/exp/maps"
+
 	"github.com/andrew-d/homeauth/internal/buildtags"
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/templates"
-	"github.com/jordan-wright/email"
 )
+
+func (s *idpServer) queueEmail(e *db.PendingEmail) error {
+	// Write to our pending emails list in the database.
+	if err := s.db.Write(func(data *data) error {
+		if data.PendingEmails == nil {
+			data.PendingEmails = make(map[string]*db.PendingEmail)
+		}
+
+		id := randHex(32)
+		data.PendingEmails[id] = &db.PendingEmail{
+			ID:   id,
+			To:   e.To,
+			Text: e.Text,
+			HTML: e.HTML,
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	// Try to write something to the channel to wake up the email loop; if
+	// we can't, it's because something else wrote there and the loop will
+	// wake up imminently.
+	select {
+	case s.triggerEmailCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *idpServer) runEmailLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	// Load something into the trigger channel to start the loop.
+	select {
+	case s.triggerEmailCh <- struct{}{}:
+	default:
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.triggerEmailCh:
+			if err := s.sendPendingEmails(ctx, time.Now()); err != nil {
+				s.logger.Error("error sending pending emails", errAttr(err))
+			}
+		case now := <-ticker.C:
+			if err := s.sendPendingEmails(ctx, now); err != nil {
+				s.logger.Error("error sending pending emails", errAttr(err))
+			}
+		}
+	}
+}
+
+func (s *idpServer) sendPendingEmails(ctx context.Context, now time.Time) error {
+	// Start by loading our email configuration and all pending emails from
+	// the database. We don't need to worry anything else reading these
+	// concurrently, since there's only one thing (this function) sending emails.
+	var (
+		emailConfig *EmailConfig
+		pending     []*db.PendingEmail
+	)
+	s.db.Read(func(data *data) {
+		emailConfig = data.Config.Email
+		pending = xmaps.Values(data.PendingEmails)
+	})
+
+	// If we have no pending emails, we're done.
+	if len(pending) == 0 {
+		return nil
+	}
+
+	// The "From" address is either explicitly set or the SMTP username.
+	fromAddr := cmp.Or(emailConfig.FromAddress, emailConfig.SMTPUsername)
+
+	// The subject is either a default or explicitly set.
+	subject := fmt.Sprintf("Login to homeauth (%s)", s.serverHostname)
+	subject = cmp.Or(emailConfig.Subject, subject)
+
+	// Split the host and port from the address; we know this never fails
+	// because initializeConfig checked.
+	host, _, _ := net.SplitHostPort(emailConfig.SMTPServer)
+	auth := smtp.PlainAuth(
+		emailConfig.FromAddress,  // identity
+		emailConfig.SMTPUsername, // user
+		emailConfig.SMTPPassword, // password
+		host,                     // host
+	)
+
+	var (
+		errs      []error
+		successes []string // of email IDs
+	)
+	for _, pendEmail := range pending {
+		e := &email.Email{
+			To:      []string{pendEmail.To},
+			From:    fmt.Sprintf("homeauth <%s>", fromAddr),
+			Subject: subject,
+			Text:    []byte(pendEmail.Text),
+			HTML:    []byte(pendEmail.HTML),
+		}
+
+		var err error
+		if emailConfig.useTLS() {
+			err = e.SendWithTLS(emailConfig.SMTPServer, auth, &tls.Config{
+				ServerName: host,
+			})
+		} else if emailConfig.useStartTLS() {
+			err = e.SendWithStartTLS(emailConfig.SMTPServer, auth, &tls.Config{
+				ServerName: host,
+			})
+		} else {
+			// No TLS; TODO: should we disable this?
+			err = e.Send(emailConfig.SMTPServer, auth)
+		}
+		if err != nil {
+			s.logger.Error("failed to send email", "to", pendEmail.To, "id", pendEmail.ID, errAttr(err))
+			errs = append(errs, err)
+			continue
+		}
+
+		// If we succeeded, remove this email from the pending list.
+		s.logger.Debug("sent email", "to", pendEmail.To, "id", pendEmail.ID)
+		successes = append(successes, pendEmail.ID)
+	}
+
+	// Remove all the emails that we successfully sent from our database.
+	if err := s.db.Write(func(data *data) error {
+		for _, id := range successes {
+			delete(data.PendingEmails, id)
+			s.logger.Debug("removing sent email from pending list", "id", id)
+		}
+		return nil
+	}); err != nil {
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
+}
 
 // servePostLoginEmail is called when the user logs in by selecting the "log in
 // with magic link" option.
@@ -28,9 +173,7 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 		NextURL:  s.getNextURL(r),
 	}
 
-	var emailConfig *EmailConfig
 	if err := s.db.Write(func(data *data) error {
-		emailConfig = data.Config.Email
 		if data.MagicLinks == nil {
 			data.MagicLinks = make(map[string]*db.MagicLoginLink)
 		}
@@ -50,46 +193,14 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 		)
 	}
 
-	fromAddr := cmp.Or(emailConfig.FromAddress, emailConfig.SMTPUsername)
-	subject := fmt.Sprintf("Login to homeauth (%s)", s.serverHostname)
-
 	// Send the user an email
-	e := &email.Email{
-		To:      []string{user.Email},
-		From:    fmt.Sprintf("homeauth <%s>", fromAddr),
-		Subject: cmp.Or(emailConfig.Subject, subject),
-		Text:    []byte("Use this link to log in: " + magicURL),
-		HTML:    makeEmailBody(magicURL),
-	}
-
-	// Split the host and port from the address; we know this never fails
-	// because initializeConfig checked.
-	host, _, _ := net.SplitHostPort(emailConfig.SMTPServer)
-	auth := smtp.PlainAuth(
-		emailConfig.FromAddress,  // identity
-		emailConfig.SMTPUsername, // user
-		emailConfig.SMTPPassword, // password
-		host,                     // host
-	)
-
-	// Use TLS if either explicitly set or no TLS options are set.
-	var err error
-	if emailConfig.useTLS() {
-		err = e.SendWithTLS(emailConfig.SMTPServer, auth, &tls.Config{
-			ServerName: host,
-		})
-	} else if emailConfig.useStartTLS() {
-		err = e.SendWithStartTLS(emailConfig.SMTPServer, auth, &tls.Config{
-			ServerName: host,
-		})
-	} else {
-		// No TLS; TODO: should we disable this?
-		err = e.Send(emailConfig.SMTPServer, auth)
-	}
-
-	if err != nil {
-		s.logger.Error("failed to send email", errAttr(err))
-		http.Error(w, "internal server error; failed to send email", http.StatusInternalServerError)
+	if err := s.queueEmail(&db.PendingEmail{
+		To:   user.Email,
+		Text: "Use this link to log in: " + magicURL,
+		HTML: makeEmailBody(magicURL),
+	}); err != nil {
+		s.logger.Error("failed to queue email", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -114,14 +225,14 @@ var emailBodyTemplate = template.Must(template.New("email").Parse(`<!DOCTYPE htm
 </body>
 </html>`))
 
-func makeEmailBody(magicURL string) []byte {
+func makeEmailBody(magicURL string) string {
 	var buf bytes.Buffer
 	if err := emailBodyTemplate.Execute(&buf, map[string]any{
 		"MagicURL": magicURL,
 	}); err != nil {
 		panic(fmt.Sprintf("failed to execute email body template: %v", err))
 	}
-	return buf.Bytes()
+	return buf.String()
 }
 
 // serveGetMagicLogin is called when the user clicks on the magic login link in

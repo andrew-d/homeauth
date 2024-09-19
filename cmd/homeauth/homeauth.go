@@ -94,6 +94,7 @@ func main() {
 		db:             db,
 		hasher:         hasher,
 		webAuthn:       webAuthn,
+		triggerEmailCh: make(chan struct{}, 1),
 	}
 	if err := idp.initializeConfig(); err != nil {
 		fatal(logger, "invalid configuration", errAttr(err))
@@ -120,6 +121,7 @@ func main() {
 
 	// Start background cleaners
 	go idp.runCleaners(ctx)
+	go idp.runEmailLoop(ctx)
 
 	logger.Info("homeauth listening, press Ctrl+C to stop",
 		"addr", fmt.Sprintf("http://localhost:%d/", *port))
@@ -153,6 +155,7 @@ type idpServer struct {
 	sessions       *sessionManager
 	hasher         *pwhash.Hasher
 	webAuthn       *webauthn.WebAuthn
+	triggerEmailCh chan struct{}
 }
 
 func (s *idpServer) initializeConfig() error {

@@ -127,6 +127,14 @@ type WebAuthnCredential struct {
 	UserUUID string
 }
 
+// PendingEmail is an email that is pending being sent.
+type PendingEmail struct {
+	ID   string
+	To   string
+	Text string
+	HTML string
+}
+
 // JSONTime is a time.Time wrapper that serializes to/from JSON as a Unix
 // timestamp in milliseconds.
 type JSONTime struct {
