@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/neilotoole/slogt"
 	"golang.org/x/net/publicsuffix"
 
@@ -78,6 +79,12 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		timeNow: time.Now,
 	}
 
+	wconfig := makeWebAuthnConfig(srv.URL)
+	webAuthn, err := webauthn.New(wconfig)
+	if err != nil {
+		tb.Fatalf("failed to create WebAuthn config: %v", err)
+	}
+
 	idp := &idpServer{
 		logger:         slogt.New(tb),
 		serverURL:      srv.URL,
@@ -85,6 +92,7 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		sessions:       smgr,
 		db:             database,
 		hasher:         pwhash.New(2, 512*1024, 2),
+		webAuthn:       webAuthn,
 	}
 	if err := idp.initializeConfig(); err != nil {
 		tb.Fatalf("failed to initialize config: %v", err)
@@ -610,6 +618,34 @@ func extractResponseJSON[T any](tb testing.TB, resp *http.Response) T {
 		tb.Fatalf("failed to decode JSON: %v", err)
 	}
 	return val
+}
+
+func mustPostJSONBytes[Req comparable](tb testing.TB, client *http.Client, path string, body Req) []byte {
+	var bodyReader io.Reader
+
+	var zero Req
+	if body != zero {
+		data, err := json.Marshal(body)
+		if err != nil {
+			tb.Fatalf("failed to marshal JSON: %v", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	resp, err := client.Post(path, "application/json", bodyReader)
+	if err != nil {
+		tb.Fatalf("failed to post %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		tb.Fatalf("unexpected status code: %d", resp.StatusCode)
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		tb.Fatalf("failed to read response body: %v", err)
+	}
+	return respBody
 }
 
 func mustPostJSON[Req, Resp any](tb testing.TB, client *http.Client, path string, body *Req) *Resp {

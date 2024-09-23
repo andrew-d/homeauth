@@ -72,15 +72,7 @@ func main() {
 		timeNow: time.Now,
 	}
 
-	wconfig := &webauthn.Config{
-		RPDisplayName: "homeauth",
-		RPID:          u.Hostname(), // Generally the FQDN for your site
-		RPOrigins: []string{
-			*serverURL,
-			// TODO: more?
-		},
-	}
-
+	wconfig := makeWebAuthnConfig(*serverURL)
 	webAuthn, err := webauthn.New(wconfig)
 	if err != nil {
 		fatal(logger, "failed to initialize WebAuthn", errAttr(err))
@@ -145,6 +137,22 @@ func main() {
 	if err := srv.Close(); err != nil {
 		logger.Error("error during hard shutdown", errAttr(err))
 	}
+}
+
+func makeWebAuthnConfig(serverURL string) *webauthn.Config {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		panic(fmt.Sprintf("invalid server URL: %v", err))
+	}
+
+	wconfig := &webauthn.Config{
+		RPDisplayName: "homeauth",
+		RPID:          u.Hostname(), // Generally the FQDN for your site
+		RPOrigins: []string{
+			serverURL,
+		},
+	}
+	return wconfig
 }
 
 type idpServer struct {
