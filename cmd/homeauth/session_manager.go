@@ -10,6 +10,7 @@ import (
 
 type sessionManager struct {
 	db      *jsonfile.JSONFile[data]
+	domain  string
 	timeNow func() time.Time
 }
 
@@ -70,7 +71,7 @@ func (s *sessionManager) newSession(f func(*db.Session)) (*db.Session, error) {
 // writeSessionCookie writes a session cookie to the provided response describing
 // the provided session.
 func (s *sessionManager) writeSessionCookie(w http.ResponseWriter, r *http.Request, session *db.Session) {
-	cookie := sessionCookieFor(session.ID, r.URL.Scheme == "https")
+	cookie := sessionCookieFor(session.ID, s.domain, r.URL.Scheme == "https")
 
 	// Calculate how long the cookie should last based on the current time.
 	// We send this as a MaxAge value to the client, instead of an absolute

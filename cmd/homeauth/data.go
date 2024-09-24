@@ -34,6 +34,9 @@ type config struct {
 	PrimarySigningKeyID string
 	SigningKeys         map[string]*db.SigningKey // keyed by SigningKey.ID
 
+	// Domain to set a cookie on; if empty, the domain of the request is used.
+	CookieDomain string
+
 	// Email sending configuration.
 	Email *EmailConfig
 }

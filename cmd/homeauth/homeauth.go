@@ -71,6 +71,9 @@ func main() {
 		db:      db,
 		timeNow: time.Now,
 	}
+	db.Read(func(data *data) {
+		smgr.domain = data.Config.CookieDomain
+	})
 
 	wconfig := makeWebAuthnConfig(*serverURL)
 	webAuthn, err := webauthn.New(wconfig)
@@ -307,6 +310,11 @@ func (s *idpServer) httpHandler() http.Handler {
 		// Logout
 		r.Post("/account/logout", s.serveLogout)
 		r.Post("/account/logout-other-sessions", s.serveLogoutOtherSessions)
+	})
+
+	// API endpoints
+	r.Group(func(r chi.Router) {
+		r.HandleFunc("/api/verify", s.serveAPIVerify)
 	})
 
 	// Add static assets
@@ -563,8 +571,9 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-
 }
+
+const allowArbitraryRedirects = true
 
 func (s *idpServer) getNextURL(r *http.Request) string {
 	// Redirect the user to the 'next' parameter, or the account page if
@@ -572,10 +581,17 @@ func (s *idpServer) getNextURL(r *http.Request) string {
 	var nextURL string = "/account"
 	if next := r.FormValue("next"); next != "" {
 		// Validate that the URL is relative and not an open redirect.
-		if u, err := url.Parse(next); err == nil && !u.IsAbs() {
+		//
+		// TODO: this breaks the forward_auth behaviour; for now,
+		// disable this and we can figure out if it's a problem or not.
+		if allowArbitraryRedirects {
 			nextURL = next
 		} else {
-			s.logger.Warn("invalid next URL", "next", next, errAttr(err), "is_abs", u.IsAbs())
+			if u, err := url.Parse(next); err == nil && !u.IsAbs() {
+				nextURL = next
+			} else {
+				s.logger.Warn("invalid next URL", "next", next, errAttr(err), "is_abs", u.IsAbs())
+			}
 		}
 	}
 	return nextURL
@@ -671,6 +687,7 @@ func (s *idpServer) serveLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var cookieDomain string
 	s.db.Write(func(data *data) error {
 		// Delete all sessions for the current user.
 		for _, session := range data.Sessions {
@@ -687,6 +704,7 @@ func (s *idpServer) serveLogout(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		cookieDomain = data.Config.CookieDomain
 		return nil
 	})
 
@@ -694,7 +712,19 @@ func (s *idpServer) serveLogout(w http.ResponseWriter, r *http.Request) {
 	// TODO: this doesn't work; we end up sending a header on login like
 	// `session=; session=...` which doesn't work. Removing the session
 	// above is enough for now.
-	//s.clearSession(w, r)
+	//s.clearCookies(w, r)
+
+	// TODO: factor to sessionManager
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		Domain:   cookieDomain,
+		MaxAge:   -1,
+		Secure:   r.URL.Scheme == "https",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 
 	// TODO: we should use a flash message here or something
 	http.Redirect(w, r, "/login", http.StatusSeeOther)

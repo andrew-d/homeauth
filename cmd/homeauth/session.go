@@ -118,9 +118,10 @@ func (s *idpServer) mustUser(ctx context.Context) *db.User {
 	return user
 }
 
-func sessionCookieFor(sessionID string, secure bool) *http.Cookie {
+func sessionCookieFor(sessionID, domain string, secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     sessionCookieName,
+		Domain:   domain,
 		Path:     "/",
 		Value:    sessionID,
 		HttpOnly: true,

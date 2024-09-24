@@ -124,7 +124,7 @@ func makeFakeSession(tb testing.TB, idp *idpServer, userUUID string) *http.Cooki
 		tb.Fatalf("failed to write session: %v", err)
 	}
 
-	return sessionCookieFor(sessionID, false)
+	return sessionCookieFor(sessionID, "", false)
 }
 
 func TestOIDCFlow(t *testing.T) {
