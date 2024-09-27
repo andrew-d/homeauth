@@ -870,29 +870,3 @@ func errAttr(err error) slog.Attr {
 
 	return slog.String("error", err.Error())
 }
-
-/*
-func loggerHandler() slog.Handler {
-	rootDir := "TODO"
-	replace := func(groups []string, a slog.Attr) slog.Attr {
-		// Remove the directory from the source's filename.
-		if a.Key == slog.SourceKey {
-			source := a.Value.Any().(*slog.Source)
-
-			// Try to make the source file relative to the root
-			// directory of the package; if that's not possible,
-			// just use the filename.
-			if rel, err := filepath.Rel(rootDir, source.File); err == nil {
-				source.File = rel
-			} else {
-				source.File = filepath.Base(source.File)
-			}
-		}
-		return a
-	}
-	return slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		AddSource:   true,
-		ReplaceAttr: replace,
-	})
-}
-*/
