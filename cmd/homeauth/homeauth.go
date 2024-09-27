@@ -26,6 +26,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
+	"github.com/gorilla/csrf"
 	flag "github.com/spf13/pflag"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -172,7 +173,7 @@ type idpServer struct {
 func (s *idpServer) initializeConfig() error {
 	// Verify the config in the database.
 	var errs []error
-	s.db.Read(func(data *data) {
+	if err := s.db.Write(func(data *data) error {
 		if e := data.Config.Email; e != nil {
 			// Verify that the SMTP server is a valid host:port.
 			if e.SMTPServer == "" {
@@ -187,7 +188,19 @@ func (s *idpServer) initializeConfig() error {
 				errs = append(errs, errors.New("cannot use both TLS and StartTLS"))
 			}
 		}
-	})
+
+		// Generate a CSRF key if it's missing.
+		if len(data.Config.CSRFKey) != 32 {
+			data.Config.CSRFKey = make([]byte, 32)
+			if _, err := rand.Read(data.Config.CSRFKey); err != nil {
+				errs = append(errs, fmt.Errorf("failed to generate CSRF key: %w", err))
+			}
+		}
+
+		return nil
+	}); err != nil {
+		errs = append(errs, err)
+	}
 
 	return errors.Join(errs...)
 }
@@ -226,8 +239,22 @@ func (s *idpServer) printConfig() {
 }
 
 func (s *idpServer) httpHandler() http.Handler {
+	// Load state from the config file.
+	var (
+		csrfKey []byte
+	)
+	s.db.Read(func(data *data) {
+		csrfKey = data.Config.CSRFKey
+	})
+
 	r := chi.NewRouter()
 	r.Use(RequestLogger(s.logger))
+
+	r.Use(csrf.Protect(
+		csrfKey,
+		csrf.Secure(true), // false in development only!
+		//csrf.RequestHeader("X-CSRF-Token"), // Must be in CORS Allowed and Exposed Headers
+	))
 
 	// Ensure that all requests have a valid session cookie, since we use
 	// this to store data for e.g. passkeys.
@@ -266,7 +293,6 @@ func (s *idpServer) httpHandler() http.Handler {
 		})
 	})
 
-	// TODO: CSRF protection
 	// TODO: Access-Control-Allow-Origin header for certain endpoints
 
 	r.Get("/", s.serveIndex)
@@ -533,7 +559,8 @@ func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
 	// TODO: verify the 'next' parameter is a valid URL?
 
 	if err := templates.All().ExecuteTemplate(w, "login.html.tmpl", map[string]any{
-		"Next": r.URL.Query().Get("next"),
+		"Next":           r.URL.Query().Get("next"),
+		csrf.TemplateTag: csrf.TemplateField(r),
 	}); err != nil {
 		s.logger.Error("failed to render login template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -671,8 +698,9 @@ func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err := templates.All().ExecuteTemplate(w, "account.html.tmpl", map[string]any{
-		"User":        user,
-		"NumSessions": numSessions,
+		"User":           user,
+		"NumSessions":    numSessions,
+		csrf.TemplateTag: csrf.TemplateField(r),
 	}); err != nil {
 		s.logger.Error("failed to render account template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)

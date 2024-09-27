@@ -71,9 +71,11 @@
         <div class="button-container">
           <form action="/account/logout" method="POST">
             <button type="submit" class="button">Log Out</button>
+            {{ .csrfField }}
           </form>
           <form action="/account/logout-other-sessions" method="POST">
             <button type="submit" class="button button-outline">Log Out Other Sessions</button>
+            {{ .csrfField }}
           </form>
         </div>
       </div>

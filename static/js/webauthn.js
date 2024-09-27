@@ -78,12 +78,29 @@
     return data;
   }
 
+  function extractCsrfToken() {
+    // First see if there's a form field with the CSRF token.
+    const csrfTokenInput = document.querySelector('input[name="gorilla.csrf.Token"]');
+    if (csrfTokenInput) {
+      return csrfTokenInput.value;
+    }
+
+    const csrfTokenMeta = document.querySelector('meta[name="csrf-token"]');
+    if (csrfTokenMeta) {
+      return csrfTokenMeta.content;
+    }
+    return '';
+  }
+
   function doRegister() {
+    const csrfToken = extractCsrfToken();
+
     // Call the register endpoint to get the credential options
     const prom = fetch('/account/webauthn/register', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
       },
       body: JSON.stringify({
         //email: '{{ .User.Email }}'
@@ -137,13 +154,12 @@
           type: cred.type,
         };
 
-        debugger;
-
         // Send the credential to the server
         return fetch('/account/webauthn/register-complete', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken,
           },
           body: JSON.stringify(newCred),
         })
@@ -166,11 +182,14 @@
   }
 
   function doLogin(username) {
+    const csrfToken = extractCsrfToken();
+
     // Call the register endpoint to get the credential options
     const prom = fetch('/login/webauthn', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
       },
       body: JSON.stringify({
         username: username,

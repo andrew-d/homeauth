@@ -37,6 +37,9 @@ type config struct {
 	// Domain to set a cookie on; if empty, the domain of the request is used.
 	CookieDomain string
 
+	// 32-byte CSRF key; will be generated and re-saved if empty or invalid.
+	CSRFKey []byte
+
 	// Email sending configuration.
 	Email *EmailConfig
 }

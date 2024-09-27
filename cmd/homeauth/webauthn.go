@@ -13,6 +13,7 @@ import (
 	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/gorilla/csrf"
 )
 
 func (s *idpServer) serveWebauthnBeginLogin(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +195,7 @@ func (s *idpServer) serveWebAuthn(w http.ResponseWriter, r *http.Request) {
 	if err := templates.All().ExecuteTemplate(w, "webauthn.html.tmpl", map[string]any{
 		"User":        user,
 		"Credentials": creds,
+		"CSRFToken":   csrf.Token(r),
 	}); err != nil {
 		s.logger.Error("failed to render webauthn template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
