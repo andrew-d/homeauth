@@ -62,7 +62,16 @@ func Load[Data any](path string) (*JSONFile[Data], error) {
 	if err != nil {
 		return nil, fmt.Errorf("jsonfile.Load: %w", err)
 	}
-	if err := json.Unmarshal(p.bytes, p.data); err != nil {
+
+	// In dev mode, disallow unknown fields so that we don't overwrite anything unexpectedly.
+	if buildtags.IsDev {
+		dec := json.NewDecoder(bytes.NewReader(p.bytes))
+		dec.DisallowUnknownFields()
+		err = dec.Decode(p.data)
+	} else {
+		err = json.Unmarshal(p.bytes, p.data)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("jsonfile.Load: %w", err)
 	}
 	return p, nil
