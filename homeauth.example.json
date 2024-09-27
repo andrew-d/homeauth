@@ -1,0 +1,13 @@
+{
+  "Config": {
+    "Clients": {},
+    "CookieDomain": "example.com",
+    "Email": {
+      "FromAddress": "auth@example.com",
+      "SMTPServer": "mail.example.com:465",
+      "SMTPUsername": "auth-user",
+      "SMTPPassword": "auth-password",
+      "UseTLS": true
+    }
+  }
+}
