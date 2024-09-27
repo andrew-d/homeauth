@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,6 +30,7 @@ import (
 	"github.com/gorilla/csrf"
 	flag "github.com/spf13/pflag"
 
+	"github.com/andrew-d/homeauth/internal/buildtags"
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/templates"
@@ -294,10 +296,21 @@ func (s *idpServer) httpHandler() http.Handler {
 
 	// Create a Group for all the routes that require CSRF protection.
 	r.Group(func(r chi.Router) {
+		// We set the CSRF cookie to always be secure unless we're
+		// either (a) in development mode, or (b) listening on
+		// localhost or a localhost IP, so that the cookie is applied
+		// in tests (which don't use a HTTPS server).
+		var csrfSecure bool
+		if buildtags.IsDev {
+			csrfSecure = false
+		} else if slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, s.serverHostname) {
+			csrfSecure = false
+		}
+
 		r.Use(csrf.Protect(
 			csrfKey,
-			csrf.Secure(false), // TODO: set to false for local development and tests only
-			csrf.Path("/"),     // Set cookie on all paths
+			csrf.Secure(csrfSecure),
+			csrf.Path("/"), // Set cookie on all paths
 			csrf.RequestHeader("X-CSRF-Token"),
 			csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reason := csrf.FailureReason(r)

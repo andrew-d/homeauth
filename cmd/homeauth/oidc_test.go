@@ -65,6 +65,8 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		tb.Fatalf("failed to write initial data: %v", err)
 	}
 
+	// TODO(andrew-d): this should be using TLS in ~all cases; if we do
+	// that, drop the Secure flag logic from gorilla/csrf
 	lhandler := &lazyHandler{}
 	srv := httptest.NewServer(lhandler)
 	tb.Cleanup(srv.Close)
