@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -289,9 +291,33 @@ func (s *idpServer) serveWebAuthnRegisterComplete(w http.ResponseWriter, r *http
 		return
 	}
 
-	cred, err := s.webAuthn.FinishRegistration(wuser, *wsession, r)
+	// We can't use the webauthn.FinishRegistration function here because it
+	// expects a raw *http.Request and decodes the response from the body,
+	// whereas we have the friendly name for the credential as well.
+	//
+	// Instead decode it ourselves.
+	var requestBody struct {
+		WebAuthn     protocol.CredentialCreationResponse `json:"webauthn"`
+		FriendlyName string                              `json:"friendly_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		s.logger.Error("failed to decode request body", errAttr(err))
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// TODO: do what the webauthn.FinishRegistration function does here and
+	// check if there's any trailing data?
+	parsed, err := requestBody.WebAuthn.Parse()
 	if err != nil {
-		s.logger.Error("failed to finish registration", errAttr(err))
+		s.logger.Error("failed to parse WebAuthn response", webAuthnErrAttr(err)...)
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	cred, err := s.webAuthn.CreateCredential(wuser, *wsession, parsed)
+	if err != nil {
+		s.logger.Error("failed to finish registration", webAuthnErrAttr(err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -302,15 +328,28 @@ func (s *idpServer) serveWebAuthnRegisterComplete(w http.ResponseWriter, r *http
 			data.WebAuthnCreds = make(map[string][]*db.WebAuthnCredential)
 		}
 		data.WebAuthnCreds[user.UUID] = append(data.WebAuthnCreds[user.UUID], &db.WebAuthnCredential{
-			Credential: *cred, // TODO: don't love the * here
-			UserUUID:   user.UUID,
+			Credential:   *cred, // TODO: don't love the * here
+			UserUUID:     user.UUID,
+			FriendlyName: requestBody.FriendlyName,
 		})
+
+		// Clear the current WebAuthn session now that the user has
+		// used it to register; we don't need it.
+		session = data.Sessions[session.ID] // re-load the session
+		session.WebAuthnSession = nil
+
 		return nil
 	}); err != nil {
 		s.logger.Error("failed to save WebAuthn credential", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	s.logger.Info("WebAuthn registration complete",
+		"user", user.Email,
+		"credential_id", cred.ID,
+		"credential_friendly_name", requestBody.FriendlyName,
+	)
 
 	// All good!
 	w.Header().Set("Content-Type", "application/json")
@@ -347,4 +386,22 @@ func (w *webAuthnUser) WebAuthnCredentials() []webauthn.Credential {
 		creds = append(creds, cred.Credential)
 	}
 	return creds
+}
+
+func webAuthnErrAttr(err error) []any {
+	if err == nil {
+		return []any{slog.String("error", "<nil>")}
+	}
+
+	var protocolErr *protocol.Error
+	if !errors.As(err, &protocolErr) {
+		return []any{errAttr(err)}
+	}
+
+	return []any{
+		errAttr(err),
+		slog.String("protocol_error_type", protocolErr.Type),
+		slog.String("protocol_error_details", protocolErr.Details),
+		slog.String("protocol_error_debug", protocolErr.DevInfo),
+	}
 }

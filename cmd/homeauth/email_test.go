@@ -16,16 +16,17 @@ func TestMagicLinkLogin(t *testing.T) {
 	idp, server := newTestServer(t)
 	client := getTestClient(t, server)
 
+	// Get the login page and then load the CSRF token.
+	resp := client.Get(server.URL + "/login")
+	assertStatus(t, resp, http.StatusOK)
+	csrfToken := extractCSRFTokenFromResponse(t, resp)
+
 	// Start by making a request to the login endpoint stating that we want
 	// to use magic link login.
 	form := url.Values{}
 	form.Set("username", "andrew@du.nham.ca")
 	form.Set("via", "email")
-	resp, err := client.PostForm(server.URL+"/login?next=/fortesting", form)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp = client.PostForm(server.URL+"/login?next=/fortesting", form, withCSRFToken(csrfToken))
 
 	assertStatus(t, resp, http.StatusSeeOther)
 	if loc := resp.Header.Get("Location"); loc != "/login/check-email" {
@@ -77,12 +78,7 @@ func TestMagicLinkLogin(t *testing.T) {
 	}
 
 	// ... and if we visit the magic link, we should be logged in.
-	resp, err = client.Get(magicLink)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
+	resp = client.Get(magicLink)
 	assertStatus(t, resp, http.StatusSeeOther)
 	if loc := resp.Header.Get("Location"); loc != "/fortesting" {
 		t.Fatalf("expected redirect to /fortesting, got %q", loc)
@@ -113,12 +109,9 @@ func TestMagicLinkLoginBadToken(t *testing.T) {
 	_, server := newTestServer(t)
 	client := getTestClient(t, server)
 
-	resp, err := client.Get(server.URL + "/login/magic?token=bad-token")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
+	resp := client.Get(server.URL+"/login/magic?token=bad-token",
+		withCSRFToken(client.GetCSRFToken(server.URL)),
+	)
 	assertStatus(t, resp, http.StatusUnauthorized)
 }
 
@@ -140,11 +133,9 @@ func TestMagicLinkLoginExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := client.Get(server.URL + "/login/magic?token=expired-token")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := client.Get(server.URL+"/login/magic?token=expired-token",
+		withCSRFToken(client.GetCSRFToken(server.URL)),
+	)
 	assertStatus(t, resp, http.StatusUnauthorized)
 
 	body, _ := io.ReadAll(resp.Body)
@@ -162,6 +153,9 @@ func TestLogoutRemovesMagicLoginLinks(t *testing.T) {
 		"/account/logout-other-sessions",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
+			// Extract CSRF token for the user.
+			csrfToken := client.GetCSRFToken(server.URL)
+
 			// Create a fake session for a user and verify it works.
 			const username = "test-user"
 			req, err := http.NewRequest("GET", server.URL+"/account", nil)
@@ -171,9 +165,9 @@ func TestLogoutRemovesMagicLoginLinks(t *testing.T) {
 
 			u, _ := url.Parse(server.URL)
 			sessionCookie := makeFakeSession(t, idp, username)
-			client.Jar.SetCookies(u, []*http.Cookie{sessionCookie})
+			client.client.Jar.SetCookies(u, []*http.Cookie{sessionCookie})
 
-			resp, err := client.Do(req)
+			resp, err := client.client.Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -182,22 +176,14 @@ func TestLogoutRemovesMagicLoginLinks(t *testing.T) {
 			assertStatus(t, resp, http.StatusOK)
 
 			// Now create a new magic link for the user.
-			resp, err = client.PostForm(server.URL+"/login?next=/account", url.Values{
+			resp = client.PostForm(server.URL+"/login?next=/account", url.Values{
 				"username": {"andrew@du.nham.ca"},
 				"via":      {"email"},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
+			}, withCSRFToken(csrfToken))
 			assertStatus(t, resp, http.StatusSeeOther)
 
 			// Log out the user.
-			resp, err = client.Post(server.URL+endpoint, "application/x-www-form-urlencoded", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
+			resp = client.Post(server.URL+endpoint, "application/x-www-form-urlencoded", nil, withCSRFToken(csrfToken))
 			assertStatus(t, resp, http.StatusSeeOther)
 
 			// Verify that the magic link is gone.

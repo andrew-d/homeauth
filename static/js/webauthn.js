@@ -92,7 +92,9 @@
     return '';
   }
 
-  function doRegister() {
+  function doRegister(friendlyName) {
+    console.log("doRegister called with:", friendlyName);
+
     const csrfToken = extractCsrfToken();
 
     // Call the register endpoint to get the credential options
@@ -102,9 +104,7 @@
         'Content-Type': 'application/json',
         'X-CSRF-Token': csrfToken,
       },
-      body: JSON.stringify({
-        //email: '{{ .User.Email }}'
-      })
+      body: JSON.stringify({})
     });
     
     return prom
@@ -161,7 +161,10 @@
             'Content-Type': 'application/json',
             'X-CSRF-Token': csrfToken,
           },
-          body: JSON.stringify(newCred),
+          body: JSON.stringify({
+            webauthn: newCred,
+            friendly_name: friendlyName,
+          }),
         })
       })
       .then((r) => {

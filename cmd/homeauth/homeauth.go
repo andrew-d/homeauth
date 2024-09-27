@@ -58,6 +58,9 @@ func main() {
 		fatal(logger, "invalid server URL", "url", *serverURL, errAttr(err))
 	}
 
+	// Normalize the server URL by removing any trailing slashes.
+	*serverURL = strings.TrimSuffix(*serverURL, "/")
+
 	db, err := jsonfile.Load[data](*dbPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		db, err = jsonfile.New[data](*dbPath)
@@ -250,12 +253,6 @@ func (s *idpServer) httpHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(RequestLogger(s.logger))
 
-	r.Use(csrf.Protect(
-		csrfKey,
-		csrf.Secure(true), // false in development only!
-		//csrf.RequestHeader("X-CSRF-Token"), // Must be in CORS Allowed and Exposed Headers
-	))
-
 	// Ensure that all requests have a valid session cookie, since we use
 	// this to store data for e.g. passkeys.
 	r.Use(func(next http.Handler) http.Handler {
@@ -295,52 +292,76 @@ func (s *idpServer) httpHandler() http.Handler {
 
 	// TODO: Access-Control-Allow-Origin header for certain endpoints
 
-	r.Get("/", s.serveIndex)
-	r.Get("/.well-known/jwks.json", s.serveJWKS)
-	r.Get("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
-	// TODO: webfinger for Tailscale compat?
-	// TODO: well-known/webauthn?
-
-	// OIDC IdP endpoints
-	r.Get("/authorize/public", s.serveAuthorize)
-	r.Post("/token", s.serveToken)
-
-	// Per the OIDC spec § 5.3, the "userinfo" endpoint must support GET and POST
-	r.Get("/userinfo", s.serveUserinfo)
-	r.Post("/userinfo", s.serveUserinfo)
-
-	// TODO: OIDC RP endpoints
-
-	// Login endpoints for this application
-	r.Get("/login", s.serveGetLogin)
-	r.Post("/login", s.servePostLogin)
-
-	// Login endpoints for magic link login
-	r.Get("/login/check-email", s.serveGetLoginCheckEmail)
-	r.Get("/login/magic", s.serveGetMagicLogin)
-
-	// Login endpoints for WebAuthn
-	r.Post("/login/webauthn", s.serveWebauthnBeginLogin)
-
-	// Authenticated endpoints
+	// Create a Group for all the routes that require CSRF protection.
 	r.Group(func(r chi.Router) {
-		r.Use(s.requireLogin(http.HandlerFunc(s.redirectToLogin)))
+		r.Use(csrf.Protect(
+			csrfKey,
+			csrf.Secure(false), // TODO: set to false for local development and tests only
+			csrf.Path("/"),     // Set cookie on all paths
+			csrf.RequestHeader("X-CSRF-Token"),
+			csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reason := csrf.FailureReason(r)
+				s.logger.Warn("CSRF failure",
+					"method", r.Method,
+					"url", r.URL.String(),
+					"reason", reason,
+				)
 
-		r.Get("/account", s.serveAccount)
+				http.Error(w, fmt.Sprintf("%s - %s", http.StatusText(http.StatusForbidden), reason), http.StatusForbidden)
+			})),
+		))
 
-		// WebAuthn endpoints that require a session
-		r.Get("/account/webauthn", s.serveWebAuthn)
-		r.Post("/account/webauthn/register", s.serveWebAuthnRegister)
-		r.Post("/account/webauthn/register-complete", s.serveWebAuthnRegisterComplete)
+		r.Get("/", s.serveIndex)
+		// TODO: webfinger for Tailscale compat?
+		// TODO: well-known/webauthn?
 
-		// Logout
-		r.Post("/account/logout", s.serveLogout)
-		r.Post("/account/logout-other-sessions", s.serveLogoutOtherSessions)
+		// TODO: OIDC RP endpoints
+
+		// Login endpoints for this application
+		r.Get("/login", s.serveGetLogin)
+		r.Post("/login", s.servePostLogin)
+
+		// Login endpoints for magic link login
+		r.Get("/login/check-email", s.serveGetLoginCheckEmail)
+		r.Get("/login/magic", s.serveGetMagicLogin)
+
+		// Login endpoints for WebAuthn
+		r.Post("/login/webauthn", s.serveWebauthnBeginLogin)
+
+		// Authenticated endpoints
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireLogin(http.HandlerFunc(s.redirectToLogin)))
+
+			r.Get("/account", s.serveAccount)
+
+			// WebAuthn endpoints that require a session
+			r.Get("/account/webauthn", s.serveWebAuthn)
+			r.Post("/account/webauthn/register", s.serveWebAuthnRegister)
+			r.Post("/account/webauthn/register-complete", s.serveWebAuthnRegisterComplete)
+
+			// Logout
+			r.Post("/account/logout", s.serveLogout)
+			r.Post("/account/logout-other-sessions", s.serveLogoutOtherSessions)
+		})
 	})
 
-	// API endpoints
+	// This Group is for all the routes that *don't* require CSRF protection.
 	r.Group(func(r chi.Router) {
-		r.HandleFunc("/api/verify", s.serveAPIVerify)
+		r.Get("/.well-known/jwks.json", s.serveJWKS)
+		r.Get("/.well-known/openid-configuration", s.serveOpenIDConfiguration)
+
+		// OIDC IdP endpoints
+		r.Get("/authorize/public", s.serveAuthorize)
+		r.Post("/token", s.serveToken)
+
+		// Per the OIDC spec § 5.3, the "userinfo" endpoint must support GET and POST
+		r.Get("/userinfo", s.serveUserinfo)
+		r.Post("/userinfo", s.serveUserinfo)
+
+		// API endpoints
+		r.Group(func(r chi.Router) {
+			r.HandleFunc("/api/verify", s.serveAPIVerify)
+		})
 	})
 
 	// Add static assets

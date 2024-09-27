@@ -22,6 +22,22 @@
       margin-bottom: 0;
       padding-bottom: 0;
     }
+
+
+    .register-form {
+      border: 1px solid #ccc;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .register-form fieldset {
+      padding: 0;
+      margin: 0;
+    }
+    /* Remove bottom padding for the last child of the fieldset */
+    /* TODO: doesn't work for multiple buttons */
+    .register-form fieldset > :last-child {
+      margin-bottom: 0;
+    }
   </style>
   <meta name="csrf-token" content="{{ .CSRFToken }}">
 </head>
@@ -50,7 +66,7 @@
               <strong>ID</strong>
             </div>
             <div class="column">
-              <strong>Public Key</strong>
+              <strong>Name</strong>
             </div>
           </div>
           <!-- Iterate over every webauthn credential and show the user -->
@@ -60,14 +76,29 @@
               <span>{{ .ID | printf "%x" }}</span>
             </div>
             <div class="column">
-              <span>{{ .PublicKey | printf "%x" }}</span>
+              <span>
+                {{ with .FriendlyName }}
+                  {{ . }}
+                {{ else }}
+                  <i>(no name)</i>
+                {{ end }}
+              </span>
             </div>
           </div>
           {{ end }}
         </div>
 
-        <div class="button-container">
-          <button class="button" id="register">Register New</button>
+        <div class="register-form">
+          <form id="register-form">
+            <fieldset>
+              <h4>Register New WebAuthn Credential</h4>
+              <input type="hidden" name="csrf" value="{{ .CSRFToken }}">
+              <label for="name">Name</label>
+              <input type="text" name="name" id="name" required placeholder="Friendly name (e.g. Yubikey 5C, etc.)">
+
+              <button type="submit" class="button" id="register">Register</button>
+            </fieldset>
+          </form>
         </div>
       </div>
     </div>
@@ -76,13 +107,22 @@
   <script src="/js/webauthn.js"></script>
   <script>
     // Listen to the register button click event
-    document.getElementById('register').addEventListener('click', function() {
+    document.getElementById('register').addEventListener('click', function(event) {
+      event.preventDefault();
+
       if (!window.PublicKeyCredential) {
         alert("Error: this browser does not support WebAuthn");
         return;
       }
 
-      window.homeauth.doRegister().then((credential) => {
+      const form = document.getElementById('register-form');
+      const name = form.querySelector('input[name="name"]').value;
+      if (!name) {
+        alert("Error: credential name is required");
+        return;
+      }
+
+      window.homeauth.doRegister(name).then((credential) => {
         // TODO: something smarter
         window.location.reload();
       }).catch((err) => {

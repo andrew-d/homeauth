@@ -125,6 +125,10 @@ type WebAuthnCredential struct {
 
 	// UserUUID is the UUID of the user that this credential is for.
 	UserUUID string
+
+	// FriendlyName is the friendly, user-provided and user-visible name
+	// for this credential.
+	FriendlyName string
 }
 
 // PendingEmail is an email that is pending being sent.

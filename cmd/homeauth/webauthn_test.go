@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -19,9 +19,11 @@ func TestWebauthnLogin(t *testing.T) {
 
 	// Make a fake session for this user
 	const username = "test-user"
-	u, _ := url.Parse(server.URL)
 	sessionCookie := makeFakeSession(t, idp, username)
-	client.Jar.SetCookies(u, []*http.Cookie{sessionCookie})
+	client.SetCookies(server.URL, sessionCookie)
+
+	// Get CSRF token to use.
+	csrfToken := client.GetCSRFToken(server.URL)
 
 	// Start by registering a virtual WebAuthn client with the server.
 	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
@@ -34,13 +36,10 @@ func TestWebauthnLogin(t *testing.T) {
 	authenticator := virtualwebauthn.NewAuthenticator()
 
 	t.Run("Register", func(t *testing.T) {
-		resp, err := client.Post(server.URL+"/account/webauthn/register", "application/json", nil)
-		if err != nil || resp.StatusCode != 200 {
-			t.Fatalf("failed to register virtual WebAuthn client: %v", err)
-		} else if resp.StatusCode != 200 {
+		resp := client.Post(server.URL+"/account/webauthn/register", "application/json", nil, withCSRFToken(csrfToken))
+		if resp.StatusCode != 200 {
 			t.Fatalf("failed to register virtual WebAuthn client: status %d", resp.StatusCode)
 		}
-		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatalf("failed to read response body: %v", err)
@@ -65,14 +64,32 @@ func TestWebauthnLogin(t *testing.T) {
 		// Create attestation response that we can send to the server.
 		attestationResponse := virtualwebauthn.CreateAttestationResponse(rp, authenticator, cred, *attestationOptions)
 
+		// Un-marshal then re-marshal the response to match the
+		// server's expectation.
+		var requestBody struct {
+			WebAuthn     map[string]any `json:"webauthn"`
+			FriendlyName string         `json:"friendly_name"`
+		}
+		if err := json.Unmarshal([]byte(attestationResponse), &requestBody.WebAuthn); err != nil {
+			t.Fatalf("failed to unmarshal attestation response: %v", err)
+		}
+		requestBody.FriendlyName = "test-credential"
+
+		requestBytes, err := json.Marshal(requestBody)
+		if err != nil {
+			t.Fatalf("failed to marshal request body: %v", err)
+		}
+
 		// Send the registration response to the server.
-		resp, err = client.Post(server.URL+"/account/webauthn/register-complete", "application/json", strings.NewReader(attestationResponse))
-		if err != nil || resp.StatusCode != 200 {
-			t.Fatalf("failed to complete registration: %v", err)
-		} else if resp.StatusCode != 200 {
+		resp = client.Post(
+			server.URL+"/account/webauthn/register-complete",
+			"application/json",
+			bytes.NewReader(requestBytes),
+			withCSRFToken(csrfToken),
+		)
+		if resp.StatusCode != 200 {
 			t.Fatalf("failed to complete registration: status %d", resp.StatusCode)
 		}
-		defer resp.Body.Close()
 		webauthnCredential, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatalf("failed to read response body: %v", err)
@@ -83,6 +100,7 @@ func TestWebauthnLogin(t *testing.T) {
 	t.Run("Login", func(t *testing.T) {
 		// Use a new HTTP client to simulate a login.
 		client := getTestClient(t, server)
+		csrfToken := client.GetCSRFToken(server.URL)
 
 		type webauthnStartBody struct {
 			Username string `json:"username"`
@@ -91,12 +109,14 @@ func TestWebauthnLogin(t *testing.T) {
 		// Start a login as an unauthenticated user with no session; this
 		// should result in the Webauthn session data being stored in the
 		// ephemeral session.
-		respBytes := mustPostJSONBytes[*webauthnStartBody](
-			t, client,
+		respBytes := tcPostJSON[*webauthnStartBody, json.RawMessage](client,
 			server.URL+"/login/webauthn",
 			&webauthnStartBody{
 				Username: "andrew@du.nham.ca",
-			})
+			},
+			withCSRFToken(csrfToken),
+		)
+
 		var resp protocol.CredentialAssertion
 		if err := json.Unmarshal(respBytes, &resp); err != nil {
 			t.Fatalf("failed to unmarshal response: %v", err)
@@ -114,7 +134,7 @@ func TestWebauthnLogin(t *testing.T) {
 		uu, _ := url.Parse(server.URL)
 
 		var sessionID string
-		for _, cookie := range client.Jar.Cookies(uu) {
+		for _, cookie := range client.client.Jar.Cookies(uu) {
 			if cookie.Name == "session" {
 				sessionID = cookie.Value
 				break
@@ -156,17 +176,7 @@ func TestWebauthnLogin(t *testing.T) {
 			"via":               []string{"webauthn"},
 			"webauthn_response": []string{assertionResponse},
 		}
-
-		loginReq, err := http.NewRequest("POST", server.URL+"/login", strings.NewReader(body.Encode()))
-		if err != nil {
-			t.Fatalf("failed to create login request: %v", err)
-		}
-		loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		loginResp, err := client.Do(loginReq)
-		if err != nil {
-			t.Fatalf("failed to complete login: %v", err)
-		}
-		defer loginResp.Body.Close()
+		loginResp := client.PostForm(server.URL+"/login", body, withCSRFToken(csrfToken))
 
 		// Expect that we get a redirect to the account page.
 		if loginResp.StatusCode != 303 {
@@ -178,7 +188,7 @@ func TestWebauthnLogin(t *testing.T) {
 
 		// Verify that our client has a valid session.
 		var sessionCookie *http.Cookie
-		for _, cookie := range client.Jar.Cookies(uu) {
+		for _, cookie := range client.client.Jar.Cookies(uu) {
 			if cookie.Name == "session" {
 				sessionCookie = cookie
 				break

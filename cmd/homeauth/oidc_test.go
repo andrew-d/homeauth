@@ -1,11 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
@@ -16,7 +12,6 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/neilotoole/slogt"
-	"golang.org/x/net/publicsuffix"
 
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/jsonfile"
@@ -133,7 +128,7 @@ func TestOIDCFlow(t *testing.T) {
 	_ = idp
 
 	t.Run("openid_provider_metadata", func(t *testing.T) {
-		config := mustGetJSON[openidtypes.ProviderMetadata](t, client, server.URL+"/.well-known/openid-configuration")
+		config := tcGetJSON[openidtypes.ProviderMetadata](client, server.URL+"/.well-known/openid-configuration")
 
 		if config.Issuer == "" || config.AuthorizationEndpoint == "" || config.TokenEndpoint == "" {
 			t.Fatalf("missing required fields in OIDC configuration")
@@ -149,17 +144,11 @@ func TestOIDCFlow(t *testing.T) {
 			"scope":         {"openid"},
 			"state":         {"test-state"},
 		}
-		req, err := http.NewRequest("GET", server.URL+"/authorize/public?"+urlVals.Encode(), nil)
-		if err != nil {
-			t.Fatalf("failed to create request: %v", err)
-		}
-		req.AddCookie(makeFakeSession(t, idp, "test-user"))
-
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("failed to initiate authorization: %v", err)
-		}
-		defer resp.Body.Close()
+		resp := client.MakeRequest(
+			"GET", server.URL+"/authorize/public?"+urlVals.Encode(),
+			nil, // no body
+			withCookie(makeFakeSession(t, idp, "test-user")), // fake session
+		)
 
 		// We want to see a redirect to the client's redirect URI with a valid code.
 		if resp.StatusCode < 300 || resp.StatusCode > 399 {
@@ -197,18 +186,11 @@ func TestOIDCFlow(t *testing.T) {
 			"client_id":     {"test-client"},
 			"client_secret": {"test-secret"},
 		}
-		req, err := http.NewRequest("POST", server.URL+"/token", strings.NewReader(postData.Encode()))
-		if err != nil {
-			t.Fatalf("failed to create request for token endpoint: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("failed to request token: %v", err)
-		}
-		defer resp.Body.Close()
-
+		resp := client.MakeRequest(
+			"POST", server.URL+"/token",
+			strings.NewReader(postData.Encode()),
+			withHeader("Content-Type", "application/x-www-form-urlencoded"),
+		)
 		tokenResponse := extractResponseJSON[*openidtypes.TokenResponse](t, resp)
 		if tokenResponse.IDToken == "" {
 			t.Errorf("missing ID token in response")
@@ -231,18 +213,11 @@ func TestOIDCFlow(t *testing.T) {
 
 	// Verify that the access token can be used to make a userinfo request
 	t.Run("userinfo_endpoint", func(t *testing.T) {
-		req, err := http.NewRequest("GET", server.URL+"/userinfo", nil)
-		if err != nil {
-			t.Fatalf("failed to create request for userinfo endpoint: %v", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("failed to request userinfo: %v", err)
-		}
-		defer resp.Body.Close()
-
+		resp := client.MakeRequest(
+			"GET", server.URL+"/userinfo",
+			nil, // no body
+			withHeader("Authorization", "Bearer "+accessToken),
+		)
 		userInfo := extractResponseJSON[map[string]any](t, resp)
 		t.Logf("userinfo: %+v", userInfo)
 		if userInfo["sub"] != "test-user" {
@@ -263,16 +238,12 @@ func TestAuthorizeFailure(t *testing.T) {
 
 	// Helper function to make an authorize request with URL values
 	makeAuthorizeRequest := func(t *testing.T, urlVals url.Values) *http.Response {
-		req, err := http.NewRequest("GET", server.URL+"/authorize/public?"+urlVals.Encode(), nil)
-		if err != nil {
-			t.Fatalf("failed to create request: %v", err)
-		}
-		req.AddCookie(makeFakeSession(t, idp, "test-user"))
+		resp := client.MakeRequest(
+			"GET", server.URL+"/authorize/public?"+urlVals.Encode(),
+			nil, // no body
+			withCookie(makeFakeSession(t, idp, "test-user")), // fake session
+		)
 
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("failed to initiate authorization: %v", err)
-		}
 		t.Cleanup(func() { resp.Body.Close() })
 		return resp
 	}
@@ -327,6 +298,39 @@ func TestAuthorizeFailure(t *testing.T) {
 		})
 		assertStatus(t, resp, http.StatusNotImplemented)
 	})
+	t.Run("no_session", func(t *testing.T) {
+		// Use a different client to make the request so we don't have a session.
+		client := getTestClient(t, server)
+
+		urlVals := url.Values{
+			"response_type": {"code"},
+			"client_id":     {"test-client"},
+			"redirect_uri":  {"http://localhost/callback"},
+			"scope":         {"openid"},
+			"state":         {"test-state"},
+		}
+		authorizeURL := "/authorize/public?" + urlVals.Encode()
+		resp := client.MakeRequest(
+			"GET", server.URL+authorizeURL,
+			nil, // no body
+		)
+		assertStatus(t, resp, http.StatusSeeOther)
+
+		// We should be redirected to the login page, with the 'next' query parameter set
+		// to the original authorize URL.
+		location := resp.Header.Get("Location")
+		t.Logf("Location: %s", location)
+		uu, err := url.Parse(location)
+		if err != nil {
+			t.Fatalf("failed to parse location header: %v", err)
+		}
+		if uu.Path != "/login" {
+			t.Fatalf("unexpected redirect location: %v, want /login", location)
+		}
+		if next := uu.Query().Get("next"); next != authorizeURL {
+			t.Errorf("unexpected next query parameter: %q, want %q", next, authorizeURL)
+		}
+	})
 }
 
 func TestTokenFailure(t *testing.T) {
@@ -334,16 +338,12 @@ func TestTokenFailure(t *testing.T) {
 	client := getTestClient(t, server)
 
 	makeTokenRequest := func(t *testing.T, urlVals url.Values) *http.Response {
-		req, err := http.NewRequest("POST", server.URL+"/token", strings.NewReader(urlVals.Encode()))
-		if err != nil {
-			t.Fatalf("failed to create request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("failed to initiate authorization: %v", err)
-		}
+		resp := client.MakeRequest(
+			"POST", server.URL+"/token",
+			strings.NewReader(urlVals.Encode()),
+			withHeader("Content-Type", "application/x-www-form-urlencoded"),
+			withCookie(makeFakeSession(t, idp, "test-user")), // fake session
+		)
 		t.Cleanup(func() { resp.Body.Close() })
 		return resp
 	}
@@ -507,16 +507,11 @@ func TestUserinfoFailure(t *testing.T) {
 	client := getTestClient(t, server)
 
 	makeUserinfoRequest := func(t *testing.T, accessToken string) *http.Response {
-		req, err := http.NewRequest("GET", server.URL+"/userinfo", nil)
-		if err != nil {
-			t.Fatalf("failed to create request: %v", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("failed to initiate authorization: %v", err)
-		}
+		resp := client.MakeRequest(
+			"GET", server.URL+"/userinfo",
+			nil, // no body
+			withHeader("Authorization", "Bearer "+accessToken),
+		)
 		t.Cleanup(func() { resp.Body.Close() })
 		return resp
 	}
@@ -572,104 +567,4 @@ func TestUserinfoFailure(t *testing.T) {
 		resp := makeUserinfoRequest(t, tokenID)
 		assertStatus(t, resp, http.StatusUnauthorized)
 	})
-}
-
-func getTestClient(tb testing.TB, server *httptest.Server) *http.Client {
-	tb.Helper()
-
-	jar, err := cookiejar.New(&cookiejar.Options{
-		PublicSuffixList: publicsuffix.List,
-	})
-	if err != nil {
-		tb.Fatalf("failed to create cookie jar: %v", err)
-	}
-
-	client := server.Client()
-
-	// We never want the client to follow redirects, as we want to see the
-	// redirect URL.
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		tb.Logf("not following redirect: %v", req.URL)
-		return http.ErrUseLastResponse
-	}
-	client.Jar = jar
-	return client
-}
-
-func mustGetJSON[T any](tb testing.TB, client *http.Client, path string) *T {
-	tb.Helper()
-	resp, err := client.Get(path)
-	if err != nil {
-		tb.Fatalf("failed to get %s: %v", path, err)
-	}
-	defer resp.Body.Close()
-
-	return extractResponseJSON[*T](tb, resp)
-}
-
-func extractResponseJSON[T any](tb testing.TB, resp *http.Response) T {
-	tb.Helper()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		tb.Fatalf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	var val T
-	if err := json.NewDecoder(resp.Body).Decode(&val); err != nil {
-		tb.Fatalf("failed to decode JSON: %v", err)
-	}
-	return val
-}
-
-func mustPostJSONBytes[Req comparable](tb testing.TB, client *http.Client, path string, body Req) []byte {
-	var bodyReader io.Reader
-
-	var zero Req
-	if body != zero {
-		data, err := json.Marshal(body)
-		if err != nil {
-			tb.Fatalf("failed to marshal JSON: %v", err)
-		}
-		bodyReader = bytes.NewReader(data)
-	}
-
-	resp, err := client.Post(path, "application/json", bodyReader)
-	if err != nil {
-		tb.Fatalf("failed to post %s: %v", path, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		tb.Fatalf("unexpected status code: %d", resp.StatusCode)
-	}
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		tb.Fatalf("failed to read response body: %v", err)
-	}
-	return respBody
-}
-
-func mustPostJSON[Req, Resp any](tb testing.TB, client *http.Client, path string, body *Req) *Resp {
-	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			tb.Fatalf("failed to marshal JSON: %v", err)
-		}
-		bodyReader = bytes.NewReader(data)
-	}
-
-	resp, err := client.Post(path, "application/json", bodyReader)
-	if err != nil {
-		tb.Fatalf("failed to post %s: %v", path, err)
-	}
-	defer resp.Body.Close()
-
-	return extractResponseJSON[*Resp](tb, resp)
-}
-
-func assertStatus(tb testing.TB, r *http.Response, want int) {
-	tb.Helper()
-	if r.StatusCode != want {
-		tb.Fatalf("unexpected status code: %d, want %d", r.StatusCode, want)
-	}
 }
