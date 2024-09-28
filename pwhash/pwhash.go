@@ -103,9 +103,9 @@ func (h *Hasher) formatHash(salt, hash []byte) []byte {
 	buf = append(buf, ",p="...)
 	buf = strconv.AppendInt(buf, int64(h.params.threads), 10)
 	buf = append(buf, '$')
-	buf = base64.StdEncoding.AppendEncode(buf, salt)
+	buf = base64.RawStdEncoding.AppendEncode(buf, salt)
 	buf = append(buf, '$')
-	buf = base64.StdEncoding.AppendEncode(buf, hash)
+	buf = base64.RawStdEncoding.AppendEncode(buf, hash)
 	return buf
 }
 
@@ -156,11 +156,11 @@ func splitHash(input []byte) (params, []byte, []byte) {
 	p := params{uint32(time), uint32(memory), uint8(threads)}
 
 	// Decode the salt and hash.
-	salt, err := base64.StdEncoding.DecodeString(string(fields[4]))
+	salt, err := base64.RawStdEncoding.DecodeString(string(fields[4]))
 	if err != nil {
 		return params{}, nil, nil
 	}
-	hash, err := base64.StdEncoding.DecodeString(string(fields[5]))
+	hash, err := base64.RawStdEncoding.DecodeString(string(fields[5]))
 	if err != nil {
 		return params{}, nil, nil
 	}
