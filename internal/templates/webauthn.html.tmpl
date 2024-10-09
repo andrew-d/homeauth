@@ -1,50 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Webauthn Page</title>
-  <link rel="stylesheet" href="/css/milligram.min.css">
-  <link rel="stylesheet" href="/css/main.css">
-  <style>
-    .webauthn-info {
-      border: 1px solid #ccc;
-      padding: 20px;
-      margin-bottom: 20px;
-    }
-    .webauthn-info > div {
-      padding-bottom: 10px;
-      margin-bottom: 10px;
-      border-bottom: 1px solid #ccc;
-    }
-    .webauthn-info > div:last-child {
-      border-bottom: none;
-      margin-bottom: 0;
-      padding-bottom: 0;
-    }
+{{ template "_layout.html.tmpl" . }}
 
+{{ define "title" }}Webauthn Page{{ end }}
 
-    .register-form {
-      border: 1px solid #ccc;
-      padding: 20px;
-      margin-bottom: 20px;
-    }
-    .register-form fieldset {
-      padding: 0;
-      margin: 0;
-    }
-    /* Remove bottom padding for the last child of the fieldset */
-    /* TODO: doesn't work for multiple buttons */
-    .register-form fieldset > :last-child {
-      margin-bottom: 0;
-    }
-  </style>
-  <meta name="csrf-token" content="{{ .CSRFToken }}">
-</head>
-<body>
-  <div class="navbar">
-    <h3><a href="/">homeauth</a></h3>
-  </div>
+{{ define "content" }}
   <div class="container">
     <div class="row">
       <div class="column column-50 column-offset-25">
@@ -92,7 +50,7 @@
           <form id="register-form">
             <fieldset>
               <h4>Register New WebAuthn Credential</h4>
-              <input type="hidden" name="csrf" value="{{ .CSRFToken }}">
+              <input type="hidden" name="gorilla.csrf.Token" value="{{ .CSRFToken }}">
               <label for="name">Name</label>
               <input type="text" name="name" id="name" required placeholder="Friendly name (e.g. Yubikey 5C, etc.)">
 
@@ -130,5 +88,4 @@
       });
     });
   </script>
-</body>
-</html>
+{{ end }}

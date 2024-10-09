@@ -87,6 +87,11 @@ func main() {
 		fatal(logger, "failed to initialize WebAuthn", errAttr(err))
 	}
 
+	te, err := templates.New(logger.With(slog.String("service", "templateEngine")))
+	if err != nil {
+		fatal(logger, "failed to initialize templates", errAttr(err))
+	}
+
 	idp := &idpServer{
 		logger:         logger.With(slog.String("service", "idp")),
 		serverURL:      *serverURL,
@@ -96,6 +101,7 @@ func main() {
 		hasher:         hasher,
 		webAuthn:       webAuthn,
 		triggerEmailCh: make(chan struct{}, 1),
+		templates:      te,
 	}
 	if err := idp.initializeConfig(); err != nil {
 		fatal(logger, "invalid configuration", errAttr(err))
@@ -173,6 +179,7 @@ type idpServer struct {
 	hasher         *pwhash.Hasher
 	webAuthn       *webauthn.WebAuthn
 	triggerEmailCh chan struct{}
+	templates      templates.TemplateEngine
 }
 
 func (s *idpServer) initializeConfig() error {
@@ -398,7 +405,11 @@ func (s *idpServer) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *idpServer) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
-		templates.All().ExecuteTemplate(w, "index.html.tmpl", nil)
+		err := s.templates.ExecuteTemplate(w, "index.html.tmpl", nil)
+		if err != nil {
+			s.logger.Error("failed to render page", "page", "index.html.tmpl", "err", err)
+			http.Error(w, "failed to render page", http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -592,7 +603,7 @@ func validateRedirectURI(ru *url.URL) error {
 func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
 	// TODO: verify the 'next' parameter is a valid URL?
 
-	if err := templates.All().ExecuteTemplate(w, "login.html.tmpl", map[string]any{
+	if err := s.templates.ExecuteTemplate(w, "login.html.tmpl", map[string]any{
 		"Next":           r.URL.Query().Get("next"),
 		csrf.TemplateTag: csrf.TemplateField(r),
 	}); err != nil {
@@ -731,7 +742,7 @@ func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 
-	if err := templates.All().ExecuteTemplate(w, "account.html.tmpl", map[string]any{
+	if err := s.templates.ExecuteTemplate(w, "account.html.tmpl", map[string]any{
 		"User":           user,
 		"NumSessions":    numSessions,
 		csrf.TemplateTag: csrf.TemplateField(r),

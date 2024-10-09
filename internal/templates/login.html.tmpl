@@ -1,42 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Login Page</title>
-  <link rel="stylesheet" href="/css/milligram.min.css">
-  <link rel="stylesheet" href="/css/main.css">
-  <style>
-    .login-form {
-      border: 1px solid #ccc;
-      padding: 20px;
-      margin-bottom: 20px;
-    }
-    .login-form fieldset {
-      padding: 0;
-      margin: 0;
-    }
+{{ template "_layout.html.tmpl" . }}
 
-    /* Remove bottom padding for the last child of the fieldset */
-    /* TODO: doesn't work for multiple buttons */
-    .login-form fieldset > :last-child {
-      margin-bottom: 0;
-    }
+{{ define "title" }}Login Page{{ end }}
 
-    .button-container {
-      display: flex;
-      justify-content: space-between;
-      margin-top: 20px;
-    }
-    .button-container form {
-      margin: 0;
-    }
-  </style>
-</head>
-<body>
-  <div class="navbar">
-    <h3><a href="/">homeauth</a></h3>
-  </div>
+{{ define "content" }}
   <div class="container">
     <div class="row">
       <div class="column column-50 column-offset-25">
@@ -96,5 +62,4 @@
       });
     });
   </script>
-</body>
-</html>
+{{ end }}

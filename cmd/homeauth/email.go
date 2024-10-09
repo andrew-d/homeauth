@@ -18,7 +18,6 @@ import (
 
 	"github.com/andrew-d/homeauth/internal/buildtags"
 	"github.com/andrew-d/homeauth/internal/db"
-	"github.com/andrew-d/homeauth/internal/templates"
 )
 
 func (s *idpServer) queueEmail(e *db.PendingEmail) error {
@@ -336,7 +335,7 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 // serveGetLoginCheckEmail serves a "check your email" page after the user
 // initiates a log in with a magic link.
 func (s *idpServer) serveGetLoginCheckEmail(w http.ResponseWriter, r *http.Request) {
-	if err := templates.All().ExecuteTemplate(w, "login-email.html.tmpl", nil); err != nil {
+	if err := s.templates.ExecuteTemplate(w, "login-email.html.tmpl", nil); err != nil {
 		s.logger.Error("failed to render login-email template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}

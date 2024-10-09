@@ -1,16 +1,6 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>homeauth</title>
-  <link rel="stylesheet" href="/css/milligram.min.css">
-  <link rel="stylesheet" href="/css/main.css">
-</head>
-<body>
-  <div class="navbar">
-    <h3><a href="/">homeauth</a></h3>
-  </div>
+{{ template "_layout.html.tmpl" . }}
+
+{{ define "content" }}
   <div class="container">
     <div class="row">
       <div class="column column-50 column-offset-25">
@@ -30,6 +20,4 @@
       </div>
     </div>
   </div>
-
-</body>
-</html>
+{{ end }}

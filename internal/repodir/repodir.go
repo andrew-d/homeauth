@@ -4,6 +4,7 @@
 package repodir
 
 import (
+	"fmt"
 	"go/build"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ func findRoot() (string, error) {
 	// Look through a few directories to find this filename.
 	candidatePaths := []string{
 		"internal/repodir/repodir.go",
+		"../../internal/repodir/repodir.go", // for tests which start in ./internal/templates/
 	}
 
 	gopathDir := filepath.Join("src", "github.com", "andrew-d", "homeauth", "internal", "repodir")
@@ -50,7 +52,7 @@ func findRoot() (string, error) {
 		}
 	}
 	if pkgDir == "" {
-		return "", os.ErrNotExist
+		return "", fmt.Errorf("finding package path, none of %v found", candidatePaths)
 	}
 
 	// If we found the package directory, look for the root of the
