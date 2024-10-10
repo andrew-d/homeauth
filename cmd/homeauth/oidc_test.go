@@ -16,6 +16,7 @@ import (
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/openidtypes"
+	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
 )
 
@@ -82,14 +83,20 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		tb.Fatalf("failed to create WebAuthn config: %v", err)
 	}
 
+	te, err := templates.New(slogt.New(tb).With("service", "templateEngine"))
+	if err != nil {
+		tb.Fatalf("failed to initialize template engine: %v", err)
+	}
+
 	idp := &idpServer{
-		logger:         slogt.New(tb),
+		logger:         slogt.New(tb).With("service", "idp"),
 		serverURL:      srv.URL,
 		serverHostname: "localhost",
 		sessions:       smgr,
 		db:             database,
 		hasher:         pwhash.New(2, 512*1024, 2),
 		webAuthn:       webAuthn,
+		templates:      te,
 	}
 	if err := idp.initializeConfig(); err != nil {
 		tb.Fatalf("failed to initialize config: %v", err)

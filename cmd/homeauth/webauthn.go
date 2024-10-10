@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/andrew-d/homeauth/internal/db"
-	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/csrf"
@@ -194,7 +193,7 @@ func (s *idpServer) serveWebAuthn(w http.ResponseWriter, r *http.Request) {
 		creds = data.WebAuthnCreds[user.UUID]
 	})
 
-	if err := templates.All().ExecuteTemplate(w, "webauthn.html.tmpl", map[string]any{
+	if err := s.templates.ExecuteTemplate(w, "webauthn.html.tmpl", map[string]any{
 		"User":        user,
 		"Credentials": creds,
 		"CSRFToken":   csrf.Token(r),

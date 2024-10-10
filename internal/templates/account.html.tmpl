@@ -1,42 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Account Page</title>
-  <link rel="stylesheet" href="/css/milligram.min.css">
-  <link rel="stylesheet" href="/css/main.css">
-  <style>
-    .account-info {
-      border: 1px solid #ccc;
-      padding: 20px;
-      margin-bottom: 20px;
-    }
-    .account-info > div {
-      padding-bottom: 10px;
-      margin-bottom: 10px;
-      border-bottom: 1px solid #ccc;
-    }
-    .account-info > div:last-child {
-      border-bottom: none;
-      margin-bottom: 0;
-      padding-bottom: 0;
-    }
+{{ template "_layout.html.tmpl" . }}
 
-    .button-container {
-      display: flex;
-      justify-content: space-between;
-      margin-top: 20px;
-    }
-    .button-container form {
-      margin: 0;
-    }
-  </style>
-</head>
-<body>
-  <div class="navbar">
-    <h3><a href="/">homeauth</a></h3>
-  </div>
+{{ define "title" }}Account Page{{ end }}
+
+{{ define "content" }}
   <div class="container">
     <div class="row">
       <div class="column column-50 column-offset-25">
@@ -83,5 +49,4 @@
       </div>
     </div>
   </div>
-</body>
-</html>
+{{ end }}

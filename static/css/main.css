@@ -23,3 +23,88 @@
 pre.no-border {
   border-left: none;
 }
+
+
+.account-info {
+  border: 1px solid #ccc;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.account-info > div {
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #ccc;
+}
+.account-info > div:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.button-container {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 20px;
+}
+.button-container form {
+  margin: 0;
+}
+
+
+.login-form {
+  border: 1px solid #ccc;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.login-form fieldset {
+  padding: 0;
+  margin: 0;
+}
+
+/* Remove bottom padding for the last child of the fieldset */
+/* TODO: doesn't work for multiple buttons */
+.login-form fieldset > :last-child {
+  margin-bottom: 0;
+}
+
+.button-container {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 20px;
+}
+.button-container form {
+  margin: 0;
+}
+
+
+.webauthn-info {
+  border: 1px solid #ccc;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.webauthn-info > div {
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #ccc;
+}
+.webauthn-info > div:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+
+.register-form {
+  border: 1px solid #ccc;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.register-form fieldset {
+  padding: 0;
+  margin: 0;
+}
+/* Remove bottom padding for the last child of the fieldset */
+/* TODO: doesn't work for multiple buttons */
+.register-form fieldset > :last-child {
+  margin-bottom: 0;
+}

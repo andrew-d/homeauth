@@ -4,6 +4,7 @@
 package repodir
 
 import (
+	"fmt"
 	"go/build"
 	"os"
 	"path/filepath"
@@ -25,36 +26,40 @@ func Root() (string, error) {
 }
 
 func findRoot() (string, error) {
-	// Look through a few directories to find this filename.
-	candidatePaths := []string{
-		"internal/repodir/repodir.go",
+	lookFor := filepath.Join("internal", "repodir", "repodir.go") // look for this file, as we can guarantee it exists
+
+	var candidatePaths []string
+
+	// Attempt to find the root dir by starting in CWD and going up the tree one
+	// dir at a time
+	path, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("getting CWD: %w", err)
+	}
+	for path != "/" {
+		candidatePaths = append(candidatePaths, path)
+		path = filepath.Join(path, "..")
 	}
 
-	gopathDir := filepath.Join("src", "github.com", "andrew-d", "homeauth", "internal", "repodir")
+	// Also check potential GOPATHs
+	gopathDir := filepath.Join("src", "github.com", "andrew-d", "homeauth")
 	if gp := build.Default.GOPATH; gp != "" {
 		for _, gopath := range filepath.SplitList(gp) {
-			candidatePaths = append(candidatePaths, filepath.Join(gopath, gopathDir, "repodir.go"))
+			candidatePaths = append(candidatePaths, filepath.Join(gopath, gopathDir))
 		}
 	}
 	if gp := os.Getenv("GOPATH"); gp != "" {
 		for _, gopath := range filepath.SplitList(gp) {
-			candidatePaths = append(candidatePaths, filepath.Join(gopath, gopathDir, "repodir.go"))
+			candidatePaths = append(candidatePaths, filepath.Join(gopath, gopathDir))
 		}
 	}
 
-	var pkgDir string
 	for _, path := range candidatePaths {
-		if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() {
-			pkgDir = filepath.Dir(path)
-			break
+		check := filepath.Join(path, lookFor)
+		if st, err := os.Stat(check); err == nil && st.Mode().IsRegular() {
+			return filepath.Abs(path)
 		}
 	}
-	if pkgDir == "" {
-		return "", os.ErrNotExist
-	}
 
-	// If we found the package directory, look for the root of the
-	// repository by moving up two directories.
-	rootDir := filepath.Dir(filepath.Dir(pkgDir))
-	return filepath.Abs(rootDir)
+	return "", fmt.Errorf("finding package path, %q not found in any of %v", lookFor, candidatePaths)
 }
