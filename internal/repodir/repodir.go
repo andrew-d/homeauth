@@ -26,7 +26,7 @@ func Root() (string, error) {
 }
 
 func findRoot() (string, error) {
-	lookFor := filepath.Join("internal/repodir/repodir.go") // look for this file, as we can guarantee it exists
+	lookFor := filepath.Join("internal", "repodir", "repodir.go") // look for this file, as we can guarantee it exists
 
 	var candidatePaths []string
 
