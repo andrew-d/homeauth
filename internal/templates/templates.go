@@ -105,19 +105,16 @@ func (e devEngine) ExecuteTemplate(wr io.Writer, name string, data any) error {
 
 	layouts, err := template.ParseGlob(layoutsPath)
 	if err != nil {
-		fmt.Fprintf(wr, "Error parsing layout templates from %q: %s", layoutsPath, err)
 		return fmt.Errorf("loading parsing templates from %q: %w", layoutsPath, err)
 	}
 
 	templatePath := filepath.Join(templatesDir, name)
 	template, err := layouts.ParseFiles(templatePath)
 	if err != nil {
-		// fmt.Fprintf(wr, "Error parsing page template %q: %s", templatePath, err)
 		return fmt.Errorf("loading parsing page template %q: %w", templatePath, err)
 	}
 
 	if err := template.ExecuteTemplate(wr, name, data); err != nil {
-		// fmt.Fprintf(wr, "Error executing page template %q: %s", name, err)
 		return fmt.Errorf("loading executing page template %q: %w", name, err)
 	}
 	return nil
