@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
+	"github.com/andrew-d/homeauth/securecookie"
 )
 
 type lazyHandler struct {
@@ -72,9 +74,10 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 	srv := httptest.NewServer(lhandler)
 	tb.Cleanup(srv.Close)
 
-	smgr := &sessionManager{
-		db:      database,
-		timeNow: time.Now,
+	// Create securecookie to store WebAuthn unauthenticated data during login.
+	webAuthnCookie, err := securecookie.New[webAuthnUnauthenticatedData](securecookie.NewKey())
+	if err != nil {
+		tb.Fatalf("failed to create securecookie for WebAuthn unauthenticated data: %v", err)
 	}
 
 	wconfig := makeWebAuthnConfig(srv.URL)
@@ -92,10 +95,10 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		logger:         slogt.New(tb).With("service", "idp"),
 		serverURL:      srv.URL,
 		serverHostname: "localhost",
-		sessions:       smgr,
 		db:             database,
 		hasher:         pwhash.New(2, 512*1024, 2),
 		webAuthn:       webAuthn,
+		webAuthnCookie: webAuthnCookie,
 		templates:      te,
 	}
 	if err := idp.initializeConfig(); err != nil {
@@ -111,24 +114,34 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 func makeFakeSession(tb testing.TB, idp *idpServer, userUUID string) *http.Cookie {
 	tb.Helper()
 
-	sessionID := randHex(32)
-	session := &db.Session{
-		ID:       sessionID,
-		UserUUID: userUUID,
-		Expiry:   db.JSONTime{time.Now().Add(24 * time.Hour)},
+	ctx, err := idp.smgr.Load(context.Background(), "")
+	if err != nil {
+		tb.Fatalf("failed to load session: %v", err)
+	}
+	idp.smgr.Put(ctx, skeyUserUUID, userUUID)
+	tok, expiry, err := idp.smgr.Commit(ctx)
+	if err != nil {
+		tb.Fatalf("failed to commit session: %v", err)
 	}
 
-	if err := idp.db.Write(func(d *data) error {
-		if d.Sessions == nil {
-			d.Sessions = make(map[string]*db.Session)
-		}
-		d.Sessions[sessionID] = session
-		return nil
-	}); err != nil {
-		tb.Fatalf("failed to write session: %v", err)
+	cookie := &http.Cookie{
+		Name:     idp.smgr.Cookie.Name,
+		Value:    tok,
+		Path:     idp.smgr.Cookie.Path,
+		Domain:   idp.smgr.Cookie.Domain,
+		Secure:   idp.smgr.Cookie.Secure,
+		HttpOnly: idp.smgr.Cookie.HttpOnly,
+		SameSite: idp.smgr.Cookie.SameSite,
 	}
 
-	return sessionCookieFor(sessionID, "", false)
+	if expiry.IsZero() {
+		cookie.Expires = time.Unix(1, 0)
+		cookie.MaxAge = -1
+	} else if idp.smgr.Cookie.Persist || idp.smgr.GetBool(ctx, "__rememberMe") {
+		cookie.Expires = time.Unix(expiry.Unix()+1, 0)        // Round up to the nearest second.
+		cookie.MaxAge = int(time.Until(expiry).Seconds() + 1) // Round up to the nearest second.
+	}
+	return cookie
 }
 
 func TestOIDCFlow(t *testing.T) {

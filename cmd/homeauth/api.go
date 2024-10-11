@@ -73,21 +73,15 @@ func (s *idpServer) serveAPIVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// See if the user has a session set on the request.
-	sess, ok := s.sessions.getSession(r)
-	if !ok {
+	userUUID := s.smgr.GetString(r.Context(), skeyUserUUID)
+	if userUUID == "" {
 		deny("no session found")
-		return
-	}
-
-	// Ensure that the session is authenticated.
-	if !sess.IsAuthenticated() {
-		deny("session is not authenticated")
 		return
 	}
 
 	var user *db.User
 	s.db.Read(func(d *data) {
-		user = d.Users[sess.UserUUID]
+		user = d.Users[userUUID]
 	})
 	if user == nil {
 		// Don't return or redirect; this is an error.
@@ -97,7 +91,7 @@ func (s *idpServer) serveAPIVerify(w http.ResponseWriter, r *http.Request) {
 
 	// If the session is authenticated, return a 200 OK to the client and
 	// set a header stating who the user is.
-	w.Header().Set("X-Homeauth-User-UUID", sess.UserUUID)
+	w.Header().Set("X-Homeauth-User-UUID", user.UUID)
 	w.Header().Set("X-Homeauth-User-Email", user.Email)
 	w.WriteHeader(http.StatusOK)
 }

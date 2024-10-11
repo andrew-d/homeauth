@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/descope/virtualwebauthn"
 	"github.com/go-webauthn/webauthn/protocol"
 )
@@ -135,7 +134,7 @@ func TestWebauthnLogin(t *testing.T) {
 
 		var sessionID string
 		for _, cookie := range client.client.Jar.Cookies(uu) {
-			if cookie.Name == "session" {
+			if cookie.Name == webAuthnCookieName {
 				sessionID = cookie.Value
 				break
 			}
@@ -144,19 +143,7 @@ func TestWebauthnLogin(t *testing.T) {
 			t.Fatalf("no session cookie found")
 		}
 
-		var sess *db.Session
-		idp.db.Read(func(d *data) {
-			sess = d.Sessions[sessionID]
-		})
-		if sess == nil {
-			t.Fatalf("no session found in database")
-		}
-		if !sess.IsEphemeral {
-			t.Errorf("session is not ephemeral")
-		}
-		if sess.WebAuthnSession == nil {
-			t.Errorf("no WebAuthn session found in session")
-		}
+		// TODO: verify that the encrypted cookie is valid?
 
 		// Now, complete the login using our virtual credential.
 		authenticator.AddCredential(cred)
@@ -189,7 +176,7 @@ func TestWebauthnLogin(t *testing.T) {
 		// Verify that our client has a valid session.
 		var sessionCookie *http.Cookie
 		for _, cookie := range client.client.Jar.Cookies(uu) {
-			if cookie.Name == "session" {
+			if cookie.Name == sessionCookieName {
 				sessionCookie = cookie
 				break
 			}
@@ -198,24 +185,6 @@ func TestWebauthnLogin(t *testing.T) {
 			t.Fatalf("no session cookie found")
 		}
 
-		var (
-			session *db.Session
-			user    *db.User
-		)
-		idp.db.Read(func(d *data) {
-			session = d.Sessions[sessionCookie.Value]
-			if session != nil {
-				user = d.Users[session.UserUUID]
-			}
-		})
-		if session == nil {
-			t.Fatalf("no session found in database")
-		}
-		if user == nil {
-			t.Fatalf("no user found in database")
-		}
-		if user.UUID != "test-user" {
-			t.Errorf("unexpected user: got %q, want %q", user.UUID, "test-user")
-		}
+		assertSessionFor(t, idp, sessionCookie.Value, "test-user")
 	})
 }

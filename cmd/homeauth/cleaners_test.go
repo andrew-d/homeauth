@@ -37,30 +37,6 @@ func testCleaner(tb testing.TB, f testCleanFunc, setup func(*data, time.Time), a
 	})
 }
 
-func TestSessionCleaner(t *testing.T) {
-	testCleaner(t, (*idpServer).cleanSessions, func(d *data, now time.Time) {
-		// Insert two sessions, one expired and one not.
-		d.Sessions = map[string]*db.Session{
-			"session1": &db.Session{
-				ID:     "session1",
-				Expiry: db.JSONTime{now.Add(-1 * time.Second)},
-			},
-			"session2": &db.Session{
-				ID:     "session2",
-				Expiry: db.JSONTime{now.Add(1 * time.Second)},
-			},
-		}
-	}, func(d *data) {
-		// Verify that the first session was cleaned up, but the second was not.
-		if _, ok := d.Sessions["session1"]; ok {
-			t.Error("session1 was not cleaned up")
-		}
-		if _, ok := d.Sessions["session2"]; !ok {
-			t.Error("session2 was cleaned up")
-		}
-	})
-}
-
 func TestOAuthCleaner(t *testing.T) {
 	testCleaner(t, (*idpServer).cleanOAuthCodes, func(d *data, now time.Time) {
 		// Insert two codes, one expired and one not.

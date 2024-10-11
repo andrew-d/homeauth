@@ -18,7 +18,6 @@ func (s *idpServer) runCleaners(ctx context.Context) {
 		for _, cf := range []cleanFunc{
 			s.cleanAccessTokens,
 			s.cleanOAuthCodes,
-			s.cleanSessions,
 			s.cleanMagicLinks,
 		} {
 			if err := cf(ctx, now, d); err != nil {
@@ -29,20 +28,33 @@ func (s *idpServer) runCleaners(ctx context.Context) {
 	}); err != nil {
 		s.logger.Error("error cleaning on startup", errAttr(err))
 	}
-
-	// Do an initial clean of the sessions database to remove any ephemeral
-	// sessions.
-	if err := s.cleanEphemeralSessions(ctx); err != nil {
-		s.logger.Error("error cleaning ephemeral sessions", errAttr(err))
+	if err := s.jsonFileStore.Cleanup(); err != nil {
+		s.logger.Error("error cleaning sessions on startup", errAttr(err))
 	}
+
+	const cleanInterval = 5 * time.Minute
 
 	var wg sync.WaitGroup
 
 	wg.Add(4)
-	go s.cleanPeriodically(ctx, &wg, "sessions", 5*time.Minute, s.cleanSessions)
-	go s.cleanPeriodically(ctx, &wg, "oauth_codes", 5*time.Minute, s.cleanOAuthCodes)
-	go s.cleanPeriodically(ctx, &wg, "access_tokens", 5*time.Minute, s.cleanAccessTokens)
-	go s.cleanPeriodically(ctx, &wg, "magic_links", 5*time.Minute, s.cleanMagicLinks)
+	go s.cleanPeriodically(ctx, &wg, "oauth_codes", cleanInterval, s.cleanOAuthCodes)
+	go s.cleanPeriodically(ctx, &wg, "access_tokens", cleanInterval, s.cleanAccessTokens)
+	go s.cleanPeriodically(ctx, &wg, "magic_links", cleanInterval, s.cleanMagicLinks)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(cleanInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := s.jsonFileStore.Cleanup(); err != nil {
+					s.logger.Error("error cleaning sessions", errAttr(err))
+				}
+			}
+		}
+	}()
 
 	<-ctx.Done()
 	s.logger.Info("cleaners shutting down")
@@ -55,7 +67,7 @@ type cleanFunc func(context.Context, time.Time, *data) error
 func (s *idpServer) cleanPeriodically(ctx context.Context, wg *sync.WaitGroup, name string, interval time.Duration, f cleanFunc) {
 	defer wg.Done()
 
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -70,55 +82,6 @@ func (s *idpServer) cleanPeriodically(ctx context.Context, wg *sync.WaitGroup, n
 			}
 		}
 	}
-}
-
-func (s *idpServer) cleanSessions(ctx context.Context, now time.Time, d *data) error {
-	hourAgo := now.Add(-1 * time.Hour)
-
-	var (
-		cleaned         int
-		cleanedActivity int
-	)
-	for id, sess := range d.Sessions {
-		if sess.IsEphemeral {
-			// Only clean ephemeral sessions based on their last activity.
-			if sess.LastActivity.Before(hourAgo) {
-				delete(d.Sessions, id)
-				cleanedActivity++
-				continue
-			}
-		} else {
-			// Clean all non-ephemeral sessions based on their expiry.
-			if sess.Expiry.Before(now) {
-				delete(d.Sessions, id)
-				cleaned++
-				continue
-			}
-		}
-	}
-	if cleaned > 0 {
-		s.logger.Debug("cleaned expired sessions",
-			"num_cleaned", cleaned,
-			"num_inactive", cleanedActivity,
-		)
-	}
-	return nil
-}
-
-func (s *idpServer) cleanEphemeralSessions(ctx context.Context) error {
-	return s.db.Write(func(d *data) error {
-		var cleaned int
-		for id, sess := range d.Sessions {
-			if sess.IsEphemeral {
-				delete(d.Sessions, id)
-				cleaned++
-			}
-		}
-		if cleaned > 0 {
-			s.logger.Debug("cleaned ephemeral sessions", "count", cleaned)
-		}
-		return nil
-	})
 }
 
 func (s *idpServer) cleanOAuthCodes(ctx context.Context, now time.Time, d *data) error {

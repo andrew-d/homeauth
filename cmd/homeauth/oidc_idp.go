@@ -146,7 +146,7 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Okay, we successfully validated the request parameters. Now, see if
 	// we have a user logged in.
-	session, ok := s.sessions.getSession(r)
+	userUUID := s.smgr.GetString(r.Context(), skeyUserUUID)
 
 	var (
 		user   *db.User
@@ -154,10 +154,12 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	)
 	s.db.Read(func(data *data) {
 		client = data.Config.Clients[clientID]
-		if ok {
-			user, ok = data.Users[session.UserUUID]
+
+		if userUUID != "" {
+			var ok bool
+			user, ok = data.Users[userUUID]
 			if !ok {
-				s.logger.Warn("session refers to non-existent user", "session", session, "user_uuid", session.UserUUID)
+				s.logger.Warn("session refers to non-existent user", "user_uuid", userUUID)
 			}
 		}
 	})

@@ -1,6 +1,8 @@
 package main
 
-import "github.com/andrew-d/homeauth/internal/db"
+import (
+	"github.com/andrew-d/homeauth/internal/db"
+)
 
 type data struct {
 	// Parts of the data model
@@ -8,9 +10,11 @@ type data struct {
 	MagicLinks    map[string]*db.MagicLoginLink       // keyed by MagicLoginLink.Token
 	OAuthCodes    map[string]*db.OAuthCode            // keyed by OAuthCode.Code
 	PendingEmails map[string]*db.PendingEmail         // keyed by PendingEmail.ID
-	Sessions      map[string]*db.Session              // keyed by Session.ID
 	Users         map[string]*db.User                 // keyed by User.UUID
 	WebAuthnCreds map[string][]*db.WebAuthnCredential // keyed by User.UUID
+
+	// SCS session data
+	Sessions map[string]scsSession
 
 	// Configuration
 	Config config
@@ -33,6 +37,11 @@ type config struct {
 	// Cryptographic key(s) and secrets.
 	PrimarySigningKeyID string
 	SigningKeys         map[string]*db.SigningKey // keyed by SigningKey.ID
+
+	// SecureCookieKey is the secret key to use for authenticating secure
+	// cookies. If empty or invalid, this will be generated and re-saved on
+	// program start.
+	SecureCookieKey []byte
 
 	// Domain to set a cookie on; if empty, the domain of the request is used.
 	CookieDomain string
