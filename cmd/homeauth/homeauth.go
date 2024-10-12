@@ -27,10 +27,11 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
-	"github.com/gorilla/csrf"
+
 	flag "github.com/spf13/pflag"
 
 	"github.com/andrew-d/homeauth/internal/buildtags"
+	"github.com/andrew-d/homeauth/internal/csrf"
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/templates"
@@ -201,14 +202,6 @@ func (s *idpServer) initializeConfig() error {
 			}
 		}
 
-		// Generate a CSRF key if it's missing.
-		if len(data.Config.CSRFKey) != 32 {
-			data.Config.CSRFKey = make([]byte, 32)
-			if _, err := rand.Read(data.Config.CSRFKey); err != nil {
-				errs = append(errs, fmt.Errorf("failed to generate CSRF key: %w", err))
-			}
-		}
-
 		return nil
 	}); err != nil {
 		errs = append(errs, err)
@@ -251,14 +244,6 @@ func (s *idpServer) printConfig() {
 }
 
 func (s *idpServer) httpHandler() http.Handler {
-	// Load state from the config file.
-	var (
-		csrfKey []byte
-	)
-	s.db.Read(func(data *data) {
-		csrfKey = data.Config.CSRFKey
-	})
-
 	r := chi.NewRouter()
 	r.Use(RequestLogger(s.logger))
 
@@ -314,22 +299,7 @@ func (s *idpServer) httpHandler() http.Handler {
 			csrfSecure = false
 		}
 
-		r.Use(csrf.Protect(
-			csrfKey,
-			csrf.Secure(csrfSecure),
-			csrf.Path("/"), // Set cookie on all paths
-			csrf.RequestHeader("X-CSRF-Token"),
-			csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				reason := csrf.FailureReason(r)
-				s.logger.Warn("CSRF failure",
-					"method", r.Method,
-					"url", r.URL.String(),
-					"reason", reason,
-				)
-
-				http.Error(w, fmt.Sprintf("%s - %s", http.StatusText(http.StatusForbidden), reason), http.StatusForbidden)
-			})),
-		))
+		r.Use(csrf.Middleware(csrfSecure))
 
 		r.Get("/", s.serveIndex)
 		// TODO: webfinger for Tailscale compat?
@@ -605,7 +575,8 @@ func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.templates.ExecuteTemplate(w, "login.html.tmpl", map[string]any{
 		"Next":           r.URL.Query().Get("next"),
-		csrf.TemplateTag: csrf.TemplateField(r),
+		"csrfTokenField": csrf.FormField,
+		"csrfTokenValue": csrf.GetToken(r),
 	}); err != nil {
 		s.logger.Error("failed to render login template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -739,9 +710,9 @@ func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err := s.templates.ExecuteTemplate(w, "account.html.tmpl", map[string]any{
-		"User":           user,
-		"NumSessions":    numSessions,
-		csrf.TemplateTag: csrf.TemplateField(r),
+		"User":        user,
+		"NumSessions": numSessions,
+		// csrf.TemplateTag: csrf.TemplateField(r),
 	}); err != nil {
 		s.logger.Error("failed to render account template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
