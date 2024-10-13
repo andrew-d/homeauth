@@ -106,7 +106,7 @@ type token []byte
 
 // cookieName is not exported as no clients should be accessing the cookie
 // directly. Instead use the middleware to set/get/check this value.
-const cookieName = "X-CSRF-Protect"
+const cookieName = "X-CSRF-Protect" // TODO: should maybe include our app name in this because this might conflict with other hosted apps?
 
 // tokenLength is the length in bytes of the CSRF tokens to generate. 16 bytes = 128 bits.
 const tokenLength = 16
@@ -216,7 +216,7 @@ func getTokenFromCookie(r *http.Request) token {
 func setTokenCookie(w http.ResponseWriter, token token, secure bool) {
 	encodedToken := base64.RawURLEncoding.EncodeToString(token)
 
-	cookie := http.Cookie{
+	cookie := http.Cookie{ // TODO: lack of explicit path is maybe a problem?
 		Name:     cookieName,
 		Value:    encodedToken,
 		Expires:  time.Now().Add(365 * 24 * time.Hour), // TODO: can this be infinite? Can we set relative to avoid clock errors?
