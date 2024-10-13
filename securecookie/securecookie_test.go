@@ -45,6 +45,17 @@ func TestSecureCookie(t *testing.T) {
 	}
 }
 
+func TestSecureCookie_BadJSON(t *testing.T) {
+	type notJSONSerializable struct {
+		Foo func()
+	}
+
+	key := NewKey()
+	if _, err := New[notJSONSerializable](key); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
 func TestSecureCookie_Expiry(t *testing.T) {
 	key := NewKey()
 	s, err := New[testValue](key)

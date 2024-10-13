@@ -78,6 +78,12 @@ func NewWith[T any](keys KeyProvider, opts Options) (*SecureCookie[T], error) {
 		}
 	}
 
+	// Verify that the structure type is JSON-serializable.
+	var zero T
+	if _, err := json.Marshal(zero); err != nil {
+		return nil, fmt.Errorf("type %T is not JSON-serializable: %w", zero, err)
+	}
+
 	var maxAge time.Duration
 	if opts.MaxAge > 0 {
 		maxAge = opts.MaxAge.Truncate(time.Millisecond)
