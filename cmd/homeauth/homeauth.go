@@ -634,10 +634,6 @@ func (s *idpServer) servePostLogin(w http.ResponseWriter, r *http.Request) {
 		s.servePostLoginEmail(w, r, user)
 	case "webauthn":
 		s.servePostLoginWebauthn(w, r, user)
-	case "google":
-		// Not yet implemented
-		http.Error(w, "not implemented", http.StatusNotImplemented)
-		return
 	default:
 		s.logger.Warn("no authentication method selected", "username", username)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
