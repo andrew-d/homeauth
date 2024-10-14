@@ -77,13 +77,47 @@ func TestPasswordLogin(t *testing.T) {
 	}
 
 	t.Run("Failure", func(t *testing.T) {
+		// Ensure that a variety of bad passwords correctly do not work
+		// for login.
+		tests := []struct {
+			name     string
+			password string
+		}{
+			{"empty", ""},
+			{"bad", "bad-password"},
+			{"trailing_whitespace", "hunter2 "},
+			{"case", "Hunter2"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				resp := client.Get(server.URL + "/login")
+				assertStatus(t, resp, http.StatusOK)
+				csrfToken := extractCSRFTokenFromResponse(t, resp)
+
+				form := url.Values{
+					"username": {"andrew@du.nham.ca"},
+					"password": {tt.password},
+					"via":      {"password"},
+				}
+				resp = client.PostForm(server.URL+"/login?next=/fortesting", form, withCSRFToken(csrfToken))
+				assertStatus(t, resp, http.StatusUnauthorized)
+
+				// Expect no session cookie.
+				if nn := len(resp.Cookies()); nn != 0 {
+					t.Fatalf("expected no cookies, got %d", nn)
+				}
+			})
+		}
+	})
+
+	t.Run("BadUsername", func(t *testing.T) {
 		resp := client.Get(server.URL + "/login")
 		assertStatus(t, resp, http.StatusOK)
 		csrfToken := extractCSRFTokenFromResponse(t, resp)
 
 		form := url.Values{
-			"username": {"andrew@du.nham.ca"},
-			"password": {"bad-password"},
+			"username": {"charlie@du.nham.ca"},
+			"password": {"hunter2"},
 			"via":      {"password"},
 		}
 		resp = client.PostForm(server.URL+"/login?next=/fortesting", form, withCSRFToken(csrfToken))
