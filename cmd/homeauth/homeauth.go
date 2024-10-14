@@ -418,6 +418,10 @@ func (s *idpServer) httpHandler() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.HandleFunc("/api/verify", s.serveAPIVerify)
 		})
+
+		// Liveness/readiness endpoints.
+		r.Get("/livez", s.serveLivez)
+		r.Get("/readyz", s.serveReadyz)
 	})
 
 	// Add static assets
@@ -865,6 +869,19 @@ func (s *idpServer) serveLogoutOtherSessions(w http.ResponseWriter, r *http.Requ
 
 	// TODO: we should use a flash message here or something
 	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+func (s *idpServer) serveLivez(w http.ResponseWriter, r *http.Request) {
+	// TODO(andrew-d): do more checks to make sure that the server is
+	// actually healthy; e.g. check if we can do a no-op write to the DB
+	// perhaps?
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok\n"))
+}
+
+func (s *idpServer) serveReadyz(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok\n"))
 }
 
 func (s *idpServer) clearCookies(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -61,6 +62,27 @@ func TestValidateRedirectURI(t *testing.T) {
 				t.Errorf("validateRedirectURI() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLivezReadyz(t *testing.T) {
+	t.Parallel()
+
+	_, server := newTestServer(t)
+	client := getTestClient(t, server)
+
+	resp := client.Get(server.URL + "/livez")
+	assertStatus(t, resp, http.StatusOK)
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok\n" {
+		t.Fatalf("got body %q, want %q", body, "ok\n")
+	}
+
+	resp = client.Get(server.URL + "/readyz")
+	assertStatus(t, resp, http.StatusOK)
+	body, _ = io.ReadAll(resp.Body)
+	if string(body) != "ok\n" {
+		t.Fatalf("got body %q, want %q", body, "ok\n")
 	}
 }
 
