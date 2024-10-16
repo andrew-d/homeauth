@@ -16,3 +16,27 @@ jobs:
 
       - name: Run all unit tests
         run: go test ./...
+
+  # unit-tests-compile verifies that the unit tests all compile for Linux,
+  # macOS and Windows, but without running them.
+  #
+  # This is useful to catch any platform-specific code that doesn't compile.
+  unit-tests-compile:
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [arm64, amd64]
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          cache: false
+
+      - name: Run all unit tests
+        run: |
+          env GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go test -exec=/bin/true ./...
