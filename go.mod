@@ -5,6 +5,7 @@ go 1.23
 toolchain go1.23.0
 
 require (
+	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/descope/virtualwebauthn v1.0.3
 	github.com/felixge/httpsnoop v1.0.4
 	github.com/go-chi/chi/v5 v5.1.0
