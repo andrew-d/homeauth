@@ -106,8 +106,8 @@ func TestWebauthnLogin(t *testing.T) {
 		}
 
 		// Start a login as an unauthenticated user with no session; this
-		// should result in the Webauthn session data being stored in the
-		// ephemeral session.
+		// should return both the WebAuthn options and an opaque
+		// session blob that we have to pass back to the server.
 		respBytes := tcPostJSON[*webauthnStartBody, json.RawMessage](client,
 			server.URL+"/login/webauthn",
 			&webauthnStartBody{
@@ -115,40 +115,32 @@ func TestWebauthnLogin(t *testing.T) {
 			},
 			withCSRFToken(csrfToken),
 		)
+		t.Logf("response: %s", respBytes)
 
-		var resp protocol.CredentialAssertion
+		var resp struct {
+			Options protocol.CredentialAssertion `json:"options"`
+			Session string                       `json:"session"`
+		}
 		if err := json.Unmarshal(respBytes, &resp); err != nil {
 			t.Fatalf("failed to unmarshal response: %v", err)
 		}
 
 		// Basic sanity check on the response.
-		if want := rp.ID; resp.Response.RelyingPartyID != want {
-			t.Errorf("unexpected response.RelyingPartyID: got %q, want %q", resp.Response.RelyingPartyID, want)
+		if want := rp.ID; resp.Options.Response.RelyingPartyID != want {
+			t.Errorf("unexpected response.RelyingPartyID: got %q, want %q", resp.Options.Response.RelyingPartyID, want)
 		}
 		if t.Failed() {
 			return
 		}
 
-		// Verify that we have a session with the stored session data.
-		uu, _ := url.Parse(server.URL)
-
-		var sessionID string
-		for _, cookie := range client.client.Jar.Cookies(uu) {
-			if cookie.Name == webAuthnCookieName {
-				sessionID = cookie.Value
-				break
-			}
-		}
-		if sessionID == "" {
-			t.Fatalf("no session cookie found")
-		}
-
-		// TODO: verify that the encrypted cookie is valid?
-
 		// Now, complete the login using our virtual credential.
 		authenticator.AddCredential(cred)
 
-		assertionOptions, err := virtualwebauthn.ParseAssertionOptions(string(respBytes))
+		// Slightly annoying, but we need to re-serialize the Options
+		// struct so our virtualwebauthn library can parse it.
+		optionsBytes, _ := json.Marshal(resp.Options)
+
+		assertionOptions, err := virtualwebauthn.ParseAssertionOptions(string(optionsBytes))
 		if err != nil {
 			t.Fatalf("failed to parse assertion options: %v", err)
 		}
@@ -162,6 +154,7 @@ func TestWebauthnLogin(t *testing.T) {
 			"username":          []string{"andrew@du.nham.ca"},
 			"via":               []string{"webauthn"},
 			"webauthn_response": []string{assertionResponse},
+			"webauthn_session":  []string{resp.Session},
 		}
 		loginResp := client.PostForm(server.URL+"/login", body, withCSRFToken(csrfToken))
 
@@ -174,6 +167,8 @@ func TestWebauthnLogin(t *testing.T) {
 		}
 
 		// Verify that our client has a valid session.
+		uu, _ := url.Parse(server.URL)
+
 		var sessionCookie *http.Cookie
 		for _, cookie := range client.client.Jar.Cookies(uu) {
 			if cookie.Name == sessionCookieName {

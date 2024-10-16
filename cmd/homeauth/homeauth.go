@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/subtle"
@@ -30,13 +31,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/csrf"
 	flag "github.com/spf13/pflag"
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/andrew-d/homeauth/internal/buildtags"
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
-	"github.com/andrew-d/homeauth/securecookie"
 	"github.com/andrew-d/homeauth/static"
 )
 
@@ -168,10 +169,22 @@ type idpServer struct {
 	// The following fields are initialized by the initializeConfig
 	// function.
 
-	jsonFileStore  *jsonFileStore
-	smgr           *scs.SessionManager
-	webAuthn       *webauthn.WebAuthn
-	webAuthnCookie *securecookie.SecureCookie[webAuthnUnauthenticatedData]
+	jsonFileStore *jsonFileStore
+	smgr          *scs.SessionManager
+	webAuthn      *webauthn.WebAuthn
+
+	// webAuthnAEAD is an AEAD used to encrypt the WebAuthn session data
+	// used during login. Before a user logs in, they don't have a session
+	// and thus don't have a session cookie that we can use to store the
+	// session data.
+	//
+	// We could use a cookie to store the session data, but we don't need
+	// to since we control the client-side code. Instead, we encrypt the
+	// session data with a key that is stored on the server and send it to
+	// the client, who must send it back in a hidden form field. This way,
+	// the client can't tamper with the session data, but we don't need to
+	// store any state server-side during logins.
+	webAuthnAEAD cipher.AEAD
 
 	// cookiesSecure is whether cookies set by this service should have the
 	// Secure flag set. This will be false if we're in dev mode or if the
@@ -189,6 +202,21 @@ func (s *idpServer) initializeConfig() error {
 		s.cookiesSecure = false
 	} else {
 		s.cookiesSecure = true
+	}
+
+	// Generate a random key to encrypt WebAuthn session data. It's fine if
+	// this is not persisted, since it's only used during login, and it's
+	// fine if in-progress logins fail if the server restarts. In most
+	// cases, the user won't even notice since the encrypted value is only
+	// "live" for as long as it takes to complete the passkey login.
+	var webAuthnKey [chacha20poly1305.KeySize]byte
+	if _, err := rand.Read(webAuthnKey[:]); err != nil {
+		return fmt.Errorf("failed to generate WebAuthn key: %w", err)
+	}
+	if aead, err := chacha20poly1305.NewX(webAuthnKey[:]); err != nil {
+		return fmt.Errorf("failed to create AEAD for WebAuthn key: %w", err)
+	} else {
+		s.webAuthnAEAD = aead
 	}
 
 	// Set up authenticated sessions
@@ -211,10 +239,7 @@ func (s *idpServer) initializeConfig() error {
 	sessionsOk := s.validateStoredSessions()
 
 	// Verify the config in the database.
-	var (
-		secureCookieKey []byte
-		errs            []error
-	)
+	var errs []error
 	if err := s.db.Write(func(data *data) error {
 		if e := data.Config.Email; e != nil {
 			// Verify that the SMTP server is a valid host:port.
@@ -239,12 +264,6 @@ func (s *idpServer) initializeConfig() error {
 			}
 		}
 
-		// Generate securecookie key if it doesn't exist.
-		if len(data.Config.SecureCookieKey) != securecookie.KeyLength {
-			data.Config.SecureCookieKey = securecookie.NewKey()
-		}
-		secureCookieKey = data.Config.SecureCookieKey
-
 		// Clear sessions if needed
 		if !sessionsOk {
 			data.Sessions = make(map[string]scsSession)
@@ -258,15 +277,10 @@ func (s *idpServer) initializeConfig() error {
 		errs = append(errs, err)
 	}
 
-	// Create securecookie to store WebAuthn unauthenticated data during login.
-	var err error
-	s.webAuthnCookie, err = securecookie.New[webAuthnUnauthenticatedData](secureCookieKey)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("creating securecookie: %w", err))
-	}
-
 	// Create WebAuthn configuration and structure.
 	wconfig := makeWebAuthnConfig(s.serverURL)
+
+	var err error
 	s.webAuthn, err = webauthn.New(wconfig)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("initializing WebAuthn: %w", err))

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/neilotoole/slogt"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -19,7 +18,6 @@ import (
 	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
-	"github.com/andrew-d/homeauth/securecookie"
 )
 
 type lazyHandler struct {
@@ -74,18 +72,6 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 	srv := httptest.NewServer(lhandler)
 	tb.Cleanup(srv.Close)
 
-	// Create securecookie to store WebAuthn unauthenticated data during login.
-	webAuthnCookie, err := securecookie.New[webAuthnUnauthenticatedData](securecookie.NewKey())
-	if err != nil {
-		tb.Fatalf("failed to create securecookie for WebAuthn unauthenticated data: %v", err)
-	}
-
-	wconfig := makeWebAuthnConfig(srv.URL)
-	webAuthn, err := webauthn.New(wconfig)
-	if err != nil {
-		tb.Fatalf("failed to create WebAuthn config: %v", err)
-	}
-
 	te, err := templates.New(slogt.New(tb).With("service", "templateEngine"))
 	if err != nil {
 		tb.Fatalf("failed to initialize template engine: %v", err)
@@ -97,8 +83,6 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		serverHostname: "localhost",
 		db:             database,
 		hasher:         pwhash.New(2, 512*1024, 2),
-		webAuthn:       webAuthn,
-		webAuthnCookie: webAuthnCookie,
 		templates:      te,
 	}
 	if err := idp.initializeConfig(); err != nil {
