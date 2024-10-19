@@ -50,7 +50,7 @@
           <form id="register-form">
             <fieldset>
               <h4>Register New WebAuthn Credential</h4>
-              <input type="hidden" name="gorilla.csrf.Token" value="{{ .CSRFToken }}">
+              <input type="hidden" name="{{ .csrfTokenField }}" value="{{ .csrfTokenValue }}">
               <label for="name">Name</label>
               <input type="text" name="name" id="name" required placeholder="Friendly name (e.g. Yubikey 5C, etc.)">
 

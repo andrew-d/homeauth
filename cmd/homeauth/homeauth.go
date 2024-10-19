@@ -710,9 +710,10 @@ func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err := s.templates.ExecuteTemplate(w, "account.html.tmpl", map[string]any{
-		"User":        user,
-		"NumSessions": numSessions,
-		// csrf.TemplateTag: csrf.TemplateField(r),
+		"User":           user,
+		"NumSessions":    numSessions,
+		"csrfTokenField": csrf.FormField,
+		"csrfTokenValue": csrf.GetToken(r),
 	}); err != nil {
 		s.logger.Error("failed to render account template", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)

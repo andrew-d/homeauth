@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/andrew-d/homeauth/internal/csrf"
 	"golang.org/x/net/html"
 	"golang.org/x/net/publicsuffix"
 )
@@ -207,7 +208,7 @@ func extractCSRFToken(tb testing.TB, body []byte) string {
 		tb.Fatalf("failed to parse HTML: %v", err)
 	}
 
-	const tokenName = "gorilla.csrf.Token"
+	const tokenName = csrf.FormField
 
 	// Define a helper function to recursively traverse the HTML nodes.
 	var findToken func(*html.Node) string

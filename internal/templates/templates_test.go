@@ -71,7 +71,7 @@ func TestPageData(t *testing.T) {
 	// This verifies that data is passed through to the page template.
 	t.Run("login.html.tmpl", func(t *testing.T) {
 		var output strings.Builder
-		data := map[string]string{"csrfField": sigil}
+		data := map[string]string{"csrfTokenValue": sigil}
 
 		err := te.ExecuteTemplate(&output, "login.html.tmpl", data)
 		if err != nil {

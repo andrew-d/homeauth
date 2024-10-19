@@ -79,12 +79,6 @@
   }
 
   function extractCsrfToken() {
-    // First see if there's a form field with the CSRF token.
-    const csrfTokenInput = document.querySelector('input[name="gorilla.csrf.Token"]');
-    if (csrfTokenInput) {
-      return csrfTokenInput.value;
-    }
-
     const csrfTokenMeta = document.querySelector('meta[name="csrf-token"]');
     if (csrfTokenMeta) {
       return csrfTokenMeta.content;
@@ -106,7 +100,7 @@
       },
       body: JSON.stringify({})
     });
-    
+
     return prom
       .then((r) => {
         if(r.status !== 200) {
