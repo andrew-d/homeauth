@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/andrew-d/homeauth/internal/csrf"
 	"golang.org/x/net/html"
 	"golang.org/x/net/publicsuffix"
 )
@@ -180,7 +181,7 @@ func extractResponseJSON[T any](tb testing.TB, resp *http.Response) T {
 func assertStatus(tb testing.TB, r *http.Response, want int) {
 	tb.Helper()
 	if r.StatusCode != want {
-		tb.Fatalf("unexpected status code: %d, want %d", r.StatusCode, want)
+		tb.Errorf("unexpected status code: %d, want %d", r.StatusCode, want)
 	}
 }
 
@@ -207,7 +208,7 @@ func extractCSRFToken(tb testing.TB, body []byte) string {
 		tb.Fatalf("failed to parse HTML: %v", err)
 	}
 
-	const tokenName = "gorilla.csrf.Token"
+	const tokenName = csrf.FormField
 
 	// Define a helper function to recursively traverse the HTML nodes.
 	var findToken func(*html.Node) string

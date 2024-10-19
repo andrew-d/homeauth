@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -85,9 +86,18 @@ func TestMagicLinkLogin(t *testing.T) {
 	}
 
 	// Verify that we have a session cookie...
-	cookie := resp.Cookies()[0]
-	if cookie.Name != "session" {
-		t.Fatalf("expected session cookie, got %v", cookie)
+	var cookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "session" {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		var cookies []string
+		for _, c := range resp.Cookies() {
+			cookies = append(cookies, fmt.Sprintf("%q", c.Name))
+		}
+		t.Fatalf("expected session cookie, got cookies [%v], want cookie \"session\"", strings.Join(cookies, ", "))
 	}
 
 	// ... and that it's for the right user.
