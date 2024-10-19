@@ -181,7 +181,7 @@ func extractResponseJSON[T any](tb testing.TB, resp *http.Response) T {
 func assertStatus(tb testing.TB, r *http.Response, want int) {
 	tb.Helper()
 	if r.StatusCode != want {
-		tb.Fatalf("unexpected status code: %d, want %d", r.StatusCode, want)
+		tb.Errorf("unexpected status code: %d, want %d", r.StatusCode, want)
 	}
 }
 

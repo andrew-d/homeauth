@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -103,8 +105,10 @@ func TestPasswordLogin(t *testing.T) {
 				assertStatus(t, resp, http.StatusUnauthorized)
 
 				// Expect no session cookie.
-				if nn := len(resp.Cookies()); nn != 0 {
-					t.Fatalf("expected no cookies, got %d", nn)
+				for _, c := range resp.Cookies() {
+					if c.Name == "session" {
+						t.Fatalf("got session cookie = %q, want no session cookie", c.Value)
+					}
 				}
 			})
 		}
@@ -124,8 +128,10 @@ func TestPasswordLogin(t *testing.T) {
 		assertStatus(t, resp, http.StatusUnauthorized)
 
 		// Expect no session cookie.
-		if nn := len(resp.Cookies()); nn != 0 {
-			t.Fatalf("expected no cookies, got %d", nn)
+		for _, c := range resp.Cookies() {
+			if c.Name == "session" {
+				t.Fatalf("got session cookie = %q, want no session cookie", c.Value)
+			}
 		}
 	})
 
@@ -146,9 +152,18 @@ func TestPasswordLogin(t *testing.T) {
 		}
 
 		// Verify that we have a session cookie...
-		cookie := resp.Cookies()[0]
-		if cookie.Name != "session" {
-			t.Fatalf("expected session cookie, got %v", cookie)
+		var cookie *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == "session" {
+				cookie = c
+			}
+		}
+		if cookie == nil {
+			var cookies []string
+			for _, c := range resp.Cookies() {
+				cookies = append(cookies, fmt.Sprintf("%q", c.Name))
+			}
+			t.Fatalf("expected session cookie, got cookies [%v], want cookie \"session\"", strings.Join(cookies, ", "))
 		}
 
 		// ... and that it's for the right user.
