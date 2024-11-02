@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -244,4 +245,19 @@ func extractCSRFToken(tb testing.TB, body []byte) string {
 
 	tb.Fatalf("failed to find CSRF token in HTML")
 	return ""
+}
+
+func assertSessionFor(tb testing.TB, idp *idpServer, token string, wantUserUUID string) {
+	tb.Helper()
+	if token == "" {
+		tb.Fatalf("expected session token, got empty string")
+	}
+
+	var data sessionData
+	if err := idp.sessionStore.Find(context.Background(), token, &data); err != nil {
+		tb.Fatalf("failed to load session: %v", err)
+	}
+	if data.UserUUID != wantUserUUID {
+		tb.Fatalf("expected session for user %q, got %q", wantUserUUID, data.UserUUID)
+	}
 }

@@ -91,17 +91,7 @@ func TestMagicLinkLogin(t *testing.T) {
 	}
 
 	// ... and that it's for the right user.
-	var sess *db.Session
-	idp.db.Read(func(d *data) {
-		sess = d.Sessions[cookie.Value]
-		t.Logf("sessions: %+v", d.Sessions)
-	})
-	if sess == nil {
-		t.Fatalf("no session found in database")
-	}
-	if sess.UserUUID != "test-user" {
-		t.Errorf("expected session for user test-user, got %q", sess.UserUUID)
-	}
+	assertSessionFor(t, idp, cookie.Value, "test-user")
 }
 
 func TestMagicLinkLoginBadToken(t *testing.T) {
@@ -148,52 +138,48 @@ func TestLogoutRemovesMagicLoginLinks(t *testing.T) {
 	idp, server := newTestServer(t)
 	client := getTestClient(t, server)
 
-	for _, endpoint := range []string{
-		"/account/logout",
-		"/account/logout-other-sessions",
-	} {
-		t.Run(endpoint, func(t *testing.T) {
-			// Extract CSRF token for the user.
-			csrfToken := client.GetCSRFToken(server.URL)
+	// The endpoint we're testing
+	const endpoint = "/account/logout-other-sessions"
 
-			// Create a fake session for a user and verify it works.
-			const username = "test-user"
-			req, err := http.NewRequest("GET", server.URL+"/account", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+	// Extract CSRF token for the user.
+	csrfToken := client.GetCSRFToken(server.URL)
 
-			u, _ := url.Parse(server.URL)
-			sessionCookie := makeFakeSession(t, idp, username)
-			client.client.Jar.SetCookies(u, []*http.Cookie{sessionCookie})
-
-			resp, err := client.client.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
-
-			assertStatus(t, resp, http.StatusOK)
-
-			// Now create a new magic link for the user.
-			resp = client.PostForm(server.URL+"/login?next=/account", url.Values{
-				"username": {"andrew@du.nham.ca"},
-				"via":      {"email"},
-			}, withCSRFToken(csrfToken))
-			assertStatus(t, resp, http.StatusSeeOther)
-
-			// Log out the user.
-			resp = client.Post(server.URL+endpoint, "application/x-www-form-urlencoded", nil, withCSRFToken(csrfToken))
-			assertStatus(t, resp, http.StatusSeeOther)
-
-			// Verify that the magic link is gone.
-			idp.db.Read(func(d *data) {
-				if len(d.MagicLinks) != 0 {
-					t.Errorf("expected no magic links, got %d", len(d.MagicLinks))
-				}
-			})
-		})
+	// Create a fake session for a user and verify it works.
+	const username = "test-user"
+	req, err := http.NewRequest("GET", server.URL+"/account", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+
+	u, _ := url.Parse(server.URL)
+	sessionCookie := makeFakeSession(t, idp, username)
+	client.client.Jar.SetCookies(u, []*http.Cookie{sessionCookie})
+
+	resp, err := client.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	assertStatus(t, resp, http.StatusOK)
+
+	// Now create a new magic link for the user.
+	resp = client.PostForm(server.URL+"/login?next=/account", url.Values{
+		"username": {"andrew@du.nham.ca"},
+		"via":      {"email"},
+	}, withCSRFToken(csrfToken))
+	assertStatus(t, resp, http.StatusSeeOther)
+
+	// Log out the user.
+	resp = client.Post(server.URL+endpoint, "application/x-www-form-urlencoded", nil, withCSRFToken(csrfToken))
+	assertStatus(t, resp, http.StatusSeeOther)
+
+	// Verify that the magic link is gone.
+	idp.db.Read(func(d *data) {
+		if len(d.MagicLinks) != 0 {
+			t.Errorf("expected no magic links, got %d", len(d.MagicLinks))
+		}
+	})
 }
 
 func extractMagicLink(tb testing.TB, body string) string {

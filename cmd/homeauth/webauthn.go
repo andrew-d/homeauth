@@ -152,12 +152,6 @@ func (s *idpServer) servePostLoginWebauthn(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Invalidate and remove the old (unauthenticated) session.
-	if err := s.sessions.invalidateSession(r); err != nil {
-		// Not a critical error; just log it.
-		s.logger.Error("failed to invalidate old session", errAttr(err))
-	}
-
 	http.Redirect(w, r, s.getNextURL(r), http.StatusSeeOther)
 }
 
@@ -256,7 +250,6 @@ func (s *idpServer) serveWebAuthnRegister(w http.ResponseWriter, r *http.Request
 	// that requires them.
 	ctx := r.Context()
 	user := s.mustUser(ctx)
-	session, _ := s.sessionFromContext(ctx)
 
 	// If the user doesn't have a WebAuthnID yet, generate one.
 	if user.WebAuthnID == nil {
@@ -290,17 +283,22 @@ func (s *idpServer) serveWebAuthnRegister(w http.ResponseWriter, r *http.Request
 		wuser = s.makeWebAuthnUser(data, user)
 	})
 
-	createOpts, sessionData, err := s.webAuthn.BeginRegistration(wuser)
+	createOpts, wsessionData, err := s.webAuthn.BeginRegistration(wuser)
 	if err != nil {
 		s.logger.Error("failed to begin registration", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	sessionDataBytes, err := json.Marshal(wsessionData)
+	if err != nil {
+		s.logger.Error("failed to marshal WebAuthn session data", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	// Store the session data in the session, and persist it.
-	if err := s.db.Write(func(data *data) error {
-		session = data.Sessions[session.ID] // re-load the session
-		session.WebAuthnSession = sessionData
+	if err := s.sessions.Update(ctx, func(session *sessionData) error {
+		session.WebAuthnSession = sessionDataBytes
 		return nil
 	}); err != nil {
 		s.logger.Error("failed to store session data", errAttr(err))
@@ -320,7 +318,6 @@ func (s *idpServer) serveWebAuthnRegister(w http.ResponseWriter, r *http.Request
 func (s *idpServer) serveWebAuthnRegisterComplete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := s.mustUser(ctx)
-	session, _ := s.sessionFromContext(ctx)
 
 	wuser := &webAuthnUser{user: user}
 	s.db.Read(func(data *data) {
@@ -329,9 +326,19 @@ func (s *idpServer) serveWebAuthnRegisterComplete(w http.ResponseWriter, r *http
 
 	// We're handling a registration response from the client. We expect to
 	// have a current WebAuthn session in our *db.Session type.
-	wsession := session.WebAuthnSession
-	if wsession == nil {
+	var wsessionBytes []byte
+	if sd, ok := s.sessions.Get(ctx); ok {
+		wsessionBytes = sd.WebAuthnSession
+	}
+
+	if len(wsessionBytes) == 0 {
 		s.logger.Error("no WebAuthn session found in session")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	var wsession *webauthn.SessionData
+	if err := json.Unmarshal(wsessionBytes, &wsession); err != nil {
+		s.logger.Error("failed to unmarshal WebAuthn session data", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -377,17 +384,20 @@ func (s *idpServer) serveWebAuthnRegisterComplete(w http.ResponseWriter, r *http
 			UserUUID:     user.UUID,
 			FriendlyName: requestBody.FriendlyName,
 		})
-
-		// Clear the current WebAuthn session now that the user has
-		// used it to register; we don't need it.
-		session = data.Sessions[session.ID] // re-load the session
-		session.WebAuthnSession = nil
-
 		return nil
 	}); err != nil {
 		s.logger.Error("failed to save WebAuthn credential", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
+	}
+
+	// Clear any webauthn data in the session, now that we're done with it.
+	if err := s.sessions.Update(ctx, func(session *sessionData) error {
+		session.WebAuthnSession = nil
+		return nil
+	}); err != nil {
+		s.logger.Error("failed to clear WebAuthn session data", errAttr(err))
+		// non-fatal
 	}
 
 	s.logger.Info("WebAuthn registration complete",
