@@ -37,6 +37,7 @@ import (
 	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
+	"github.com/andrew-d/homeauth/sessions"
 	"github.com/andrew-d/homeauth/static"
 )
 
@@ -75,13 +76,13 @@ func main() {
 
 	hasher := pwhash.New(2, 512*1024, 2)
 
-	smgr := &sessionManager{
-		db:      db,
-		timeNow: time.Now,
+	sessionStore := newDBSessionStore(db)
+	smgr, err := sessions.New(sessionStore)
+	if err != nil {
+		fatal(logger, "failed to initialize session manager", errAttr(err))
 	}
-	db.Read(func(data *data) {
-		smgr.domain = data.Config.CookieDomain
-	})
+	smgr.Log = logger.With(slog.String("service", "sessions"))
+	// TODO: set smgr.Lifetime?
 
 	te, err := templates.New(logger.With(slog.String("service", "templateEngine")))
 	if err != nil {
@@ -93,6 +94,7 @@ func main() {
 		serverURL:      *serverURL,
 		serverHostname: u.Hostname(),
 		sessions:       smgr,
+		sessionStore:   sessionStore,
 		db:             db,
 		hasher:         hasher,
 		triggerEmailCh: make(chan struct{}, 1),
@@ -170,7 +172,8 @@ type idpServer struct {
 	serverURL      string
 	serverHostname string
 	db             *jsonfile.JSONFile[data]
-	sessions       *sessionManager
+	sessions       *sessions.Manager[sessionData]
+	sessionStore   *dbSessionStore
 	hasher         *pwhash.Hasher
 	triggerEmailCh chan struct{}
 	templates      templates.TemplateEngine
@@ -190,6 +193,11 @@ type idpServer struct {
 	// the client can't tamper with the session data, but we don't need to
 	// store any state server-side during logins.
 	webAuthnAEAD cipher.AEAD
+
+	// cookiesSecure is whether cookies set by this service should have the
+	// Secure flag set. This will be false if we're in dev mode or if the
+	// server's hostname is 'localhost' or a localhost IP address.
+	cookiesSecure bool
 }
 
 // initializeConfig will initialize various objects and configuration fields in
@@ -210,6 +218,16 @@ func (s *idpServer) initializeConfig() error {
 	} else {
 		s.webAuthnAEAD = aead
 	}
+
+	if buildtags.IsDev {
+		s.cookiesSecure = false
+	} else if slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, s.serverHostname) {
+		// TODO: not enough if e.g. running behind Caddy
+		s.cookiesSecure = false
+	} else {
+		s.cookiesSecure = true
+	}
+	s.sessions.CookieOpts.Secure = s.cookiesSecure
 
 	// Verify the config in the database.
 	var errs []error
@@ -236,6 +254,9 @@ func (s *idpServer) initializeConfig() error {
 				errs = append(errs, fmt.Errorf("failed to generate CSRF key: %w", err))
 			}
 		}
+
+		// Configure session manager.
+		s.sessions.CookieOpts.Domain = data.Config.CookieDomain
 
 		return nil
 	}); err != nil {
@@ -298,61 +319,17 @@ func (s *idpServer) httpHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(RequestLogger(s.logger))
 
-	// Ensure that all requests have a valid session cookie, since we use
-	// this to store data for e.g. passkeys.
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			now := time.Now()
-
-			session, err := s.sessions.ensureSession(w, r, func(session *db.Session) {
-				// Unauthenticated sessions expire when the
-				// browser is closed, so we don't set the
-				// Expiry value.
-				session.IsEphemeral = true
-				session.LastActivity = db.JSONTime{now}
-			})
-			if err != nil {
-				s.logger.Error("failed to ensure session", errAttr(err))
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-
-			// If the last activity was more than a minute ago, update it.
-			if now.Sub(session.LastActivity.Time) > 1*time.Minute {
-				if err := s.db.Write(func(data *data) error {
-					session = data.Sessions[session.ID] // re-load from the database
-					session.LastActivity = db.JSONTime{time.Now()}
-					return nil
-				}); err != nil {
-					s.logger.Error("failed to update session activity", errAttr(err))
-					// non-fatal; continue
-				}
-			}
-
-			// Now that we know we have a session, add it to the request context.
-			ctx := context.WithValue(r.Context(), sessionCtxKey, session)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	})
+	// Add sessions middleware to all requests, but this isn't committed to
+	// our backing store unless the session is modified.
+	r.Use(s.sessions.Middleware)
 
 	// TODO: Access-Control-Allow-Origin header for certain endpoints
 
 	// Create a Group for all the routes that require CSRF protection.
 	r.Group(func(r chi.Router) {
-		// We set the CSRF cookie to always be secure unless we're
-		// either (a) in development mode, or (b) listening on
-		// localhost or a localhost IP, so that the cookie is applied
-		// in tests (which don't use a HTTPS server).
-		var csrfSecure bool
-		if buildtags.IsDev {
-			csrfSecure = false
-		} else if slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, s.serverHostname) {
-			csrfSecure = false
-		}
-
 		r.Use(csrf.Protect(
 			csrfKey,
-			csrf.Secure(csrfSecure),
+			csrf.Secure(s.cookiesSecure),
 			csrf.Path("/"), // Set cookie on all paths
 			csrf.RequestHeader("X-CSRF-Token"),
 			csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -704,21 +681,18 @@ func (s *idpServer) getNextURL(r *http.Request) string {
 // loginUserSession logs in a user by creating a session for them. It ignores
 // any existing session on the request.
 func (s *idpServer) loginUserSession(w http.ResponseWriter, r *http.Request, user *db.User, method string) error {
-	session, err := s.sessions.newSession(func(session *db.Session) {
-		session.UserUUID = user.UUID
-		session.Expiry = db.JSONTime{time.Now().Add(7 * 24 * time.Hour)}
+	// TODO: double-check if this allows session fixation
+	err := s.sessions.Update(r.Context(), func(sd *sessionData) error {
+		sd.UserUUID = user.UUID
+		return nil
 	})
 	if err != nil {
 		return err
 	}
 
-	// Store the session in a cookie.
-	s.sessions.writeSessionCookie(w, r, session)
-
 	s.logger.Info("logged in user",
 		"username", user.Email,
 		"user_uuid", user.UUID,
-		"session_id", session.ID,
 		"login_method", method,
 	)
 	return nil
@@ -763,16 +737,17 @@ func (s *idpServer) addUser(ctx context.Context, email, password string) error {
 func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 	user := s.mustUser(r.Context())
 
-	var (
-		numSessions int
-	)
-	s.db.Read(func(data *data) {
-		for _, session := range data.Sessions {
+	var numSessions int
+	allSessions, err := s.sessionStore.List(r.Context())
+	if err == nil {
+		for _, session := range allSessions {
 			if session.UserUUID == user.UUID {
 				numSessions++
 			}
 		}
-	})
+	} else {
+		s.logger.Error("failed to iterate over all sessions", errAttr(err))
+	}
 
 	if err := s.templates.ExecuteTemplate(w, "account.html.tmpl", map[string]any{
 		"User":           user,
@@ -785,83 +760,65 @@ func (s *idpServer) serveAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *idpServer) serveLogout(w http.ResponseWriter, r *http.Request) {
-	currSession, ok := s.sessionFromContext(r.Context())
-	if !ok {
-		s.logger.Error("no session found in context")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
+	// Destroy any existing session.
+	s.sessions.Delete(r.Context())
 
-	var cookieDomain string
-	s.db.Write(func(data *data) error {
-		// Delete all sessions for the current user.
-		for _, session := range data.Sessions {
-			if session.UserUUID != currSession.UserUUID {
-				continue
-			}
-			delete(data.Sessions, session.ID)
-		}
-
-		// Remove all magic login links for the user.
-		for token, ml := range data.MagicLinks {
-			if ml.UserUUID == currSession.UserUUID {
-				delete(data.MagicLinks, token)
-			}
-		}
-
-		cookieDomain = data.Config.CookieDomain
-		return nil
-	})
-
-	// Set an empty session cookie as well
-	// TODO: this doesn't work; we end up sending a header on login like
-	// `session=; session=...` which doesn't work. Removing the session
-	// above is enough for now.
-	//s.clearCookies(w, r)
-
-	// TODO: factor to sessionManager
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     "/",
-		Domain:   cookieDomain,
-		MaxAge:   -1,
-		Secure:   r.URL.Scheme == "https",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	// NOTE: by default we don't remove all sessions for the user, just the
+	// currently-authenticated one. This seems like the correct UX
+	// tradeoff, so that we don't e.g. invalidate a session on a user's
+	// iPhone when they log out on their laptop.
 
 	// TODO: we should use a flash message here or something
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (s *idpServer) serveLogoutOtherSessions(w http.ResponseWriter, r *http.Request) {
-	currSession, ok := s.sessionFromContext(r.Context())
-	if !ok {
-		s.logger.Error("no session found in context")
+	ctx := r.Context()
+	user := s.mustUser(ctx)
+	currentSessionID := s.sessions.GetID(ctx)
+
+	// TODO: this is a bit abstraction-breaking; we reach into the session
+	// store, which I don't love.
+	allSessions, err := s.sessionStore.List(ctx)
+	if err != nil {
+		s.logger.Error("failed to list all sessions", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// Delete all sessions except the current one.
-	s.db.Write(func(data *data) error {
-		for _, session := range data.Sessions {
-			if session.UserUUID != currSession.UserUUID {
-				continue
-			}
-			if session.ID != currSession.ID {
-				delete(data.Sessions, session.ID)
-			}
+	var toRemove []string
+	for id, session := range allSessions {
+		if session.UserUUID != user.UUID {
+			continue
 		}
+		if id != currentSessionID {
+			toRemove = append(toRemove, id)
+		}
+	}
 
-		// Remove all magic login links for the user.
+	// For all sessions that need removing, do so.
+	for _, id := range toRemove {
+		if err := s.sessionStore.Delete(ctx, id); err != nil {
+			s.logger.Error("failed to delete session",
+				"session_id", id,
+				"user_uuid", user.UUID,
+				errAttr(err))
+		}
+	}
+
+	// Remove all magic login links for the user.
+	if err := s.db.Write(func(data *data) error {
 		for token, ml := range data.MagicLinks {
-			if ml.UserUUID == currSession.UserUUID {
+			if ml.UserUUID == user.UUID {
 				delete(data.MagicLinks, token)
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		s.logger.Error("failed to delete magic links for user",
+			"user_uuid", user.UUID,
+			errAttr(err))
+	}
 
 	// TODO: we should use a flash message here or something
 	http.Redirect(w, r, "/account", http.StatusSeeOther)

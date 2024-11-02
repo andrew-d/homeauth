@@ -108,7 +108,7 @@ func New[T any](ps Store[T]) (*Manager[T], error) {
 	return ret, nil
 }
 
-// Middleware returns a middleware function that can be used to wrap HTTP
+// Middleware is a middleware function that can be used to wrap HTTP
 // handlers. The middleware will automatically load and save the session data
 // for each request.
 func (m *Manager[T]) Middleware(next http.Handler) http.Handler {
@@ -295,6 +295,20 @@ func (m *Manager[T]) Get(ctx context.Context) (T, bool) {
 		return zero, false
 	}
 	return sd.Data, true
+}
+
+// GetID will return the session token for the session data stored in the
+// current context. A session token is a random value that identifies the
+// current session.
+//
+// If there is no session data in the context, then GetID will return an empty
+// string.
+func (m *Manager[T]) GetID(ctx context.Context) string {
+	sd, ok := ctx.Value(contextKey).(*sessionData[T])
+	if !ok {
+		return ""
+	}
+	return sd.token
 }
 
 // Update will call the provided function to update the session data in the

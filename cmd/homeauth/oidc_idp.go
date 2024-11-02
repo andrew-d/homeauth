@@ -146,7 +146,7 @@ func (s *idpServer) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Okay, we successfully validated the request parameters. Now, see if
 	// we have a user logged in.
-	session, ok := s.sessions.getSession(r)
+	session, ok := s.sessions.Get(r.Context())
 
 	var (
 		user   *db.User

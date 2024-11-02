@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/pwhash"
 	"golang.org/x/net/html"
 )
@@ -156,16 +155,7 @@ func TestPasswordLogin(t *testing.T) {
 		}
 
 		// ... and that it's for the right user.
-		var sess *db.Session
-		idp.db.Read(func(d *data) {
-			sess = d.Sessions[cookie.Value]
-		})
-		if sess == nil {
-			t.Fatalf("no session found in database")
-		}
-		if sess.UserUUID != "test-user" {
-			t.Errorf("expected session for user test-user, got %q", sess.UserUUID)
-		}
+		assertSessionFor(t, idp, cookie.Value, "test-user")
 	})
 }
 

@@ -4,25 +4,30 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/andrew-d/homeauth/internal/db"
 )
 
-const sessionCookieName = "session"
+// sessionData is the data we store in our session store.
+type sessionData struct {
+	UserUUID        string `json:"u,omitempty"`
+	WebAuthnSession []byte `json:",omitempty"`
+}
 
-var sessionCtxKey = new(int)
+// IsAuthenticated returns whether a session represents an authenticated user.
+func (d sessionData) IsAuthenticated() bool {
+	return d.UserUUID != ""
+}
 
 // requireLogin is a middleware that looks up a session from the provided
-// request, verifies that it represents a logged-in user, and stores it in the
-// request's Context.
+// request and verifies that it represents a logged-in user.
 //
 // If no session is found, the error handler is called and the wrapped function
 // is not called.
 func (s *idpServer) requireLogin(errHandler http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			session, ok := s.sessions.getSession(r)
+			session, ok := s.sessions.Get(r.Context())
 			if !ok {
 				s.logger.Debug("no session found")
 				errHandler.ServeHTTP(w, r)
@@ -34,98 +39,41 @@ func (s *idpServer) requireLogin(errHandler http.Handler) func(http.Handler) htt
 				return
 			}
 
+			// Verify that the user exists
+			var validUser bool
+			s.db.Read(func(d *data) {
+				_, validUser = d.Users[session.UserUUID]
+			})
+			if !validUser {
+				s.logger.Warn("session refers to non-existent user",
+					"user_uuid", session.UserUUID)
+				errHandler.ServeHTTP(w, r)
+				return
+			}
+
 			AddRequestLogAttrs(r, slog.String("user_uuid", session.UserUUID))
-			ctx := context.WithValue(r.Context(), sessionCtxKey, session)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r)
 		})
 	}
 }
 
-// sessionFromContext retrieves a session from the provided context.
-//
-// This function only returns sessions that are authenticated and haven't
-// expired. If you need to access a session that may not be authenticated, or
-// may be expired, use sessionFromContextOpts.
-func (s *idpServer) sessionFromContext(ctx context.Context) (*db.Session, bool) {
-	return s.sessionFromContextOpts(ctx, sessionFromContextOpts{})
-}
-
-type sessionFromContextOpts struct {
-	// AllowExpired is whether to return sessions that have expired.
-	AllowExpired bool
-
-	// AllowUnauthenticated is whether sessions that are not authenticated
-	// (i.e. represent an anonymous user) should be returned.
-	AllowUnauthenticated bool
-}
-
-// sessionFromContextOpts retrieves a session from the provided context, with
-// the provided options configuring what kind of sessions are allowed.
-func (s *idpServer) sessionFromContextOpts(ctx context.Context, opts sessionFromContextOpts) (*db.Session, bool) {
-	session, ok := ctx.Value(sessionCtxKey).(*db.Session)
+// mustUser retrieves the current user from the provided context, as enforced
+// by requireLogin (above). If no user is found, it will panic.
+func (s *idpServer) mustUser(ctx context.Context) *db.User {
+	session, ok := s.sessions.Get(ctx)
 	if !ok {
-		return nil, false
-	}
-
-	if !opts.AllowUnauthenticated && !session.IsAuthenticated() {
-		return nil, false
-	}
-	if !opts.AllowExpired && !session.Expiry.IsZero() && time.Now().After(session.Expiry.Time) {
-		return nil, false
-	}
-	return session, ok
-}
-
-// currentUser returns the current user from the provided context, as set by
-// requireLogin (above). It only returns the user if the session is
-// authenticated, and will return false if no session is found.
-func (s *idpServer) currentUser(ctx context.Context) (*db.User, bool) {
-	session, ok := s.sessionFromContext(ctx)
-	if !ok {
-		return nil, false
+		panic("expected session in context")
 	}
 
 	var user *db.User
 	s.db.Read(func(d *data) {
-		// Re-check that the session exists
-		session, ok = d.Sessions[session.ID]
-		if !ok {
-			return
-		}
-		// TODO: re-check session expiry?
-
 		user = d.Users[session.UserUUID]
 	})
 
 	if user == nil {
-		if !ok {
-			s.logger.Warn("session refers to non-existent user",
-				"session_id", session.ID,
-				"user_uuid", session.UserUUID)
-		}
-		return nil, false
-	}
-	return user, true
-}
-
-// mustUser retrieves the current user from the provided context, as set by
-// requireLogin (above). If no user is found, it will panic.
-func (s *idpServer) mustUser(ctx context.Context) *db.User {
-	user, ok := s.currentUser(ctx)
-	if !ok {
+		s.logger.Warn("session refers to non-existent user",
+			"user_uuid", session.UserUUID)
 		panic("no user found in context")
 	}
 	return user
-}
-
-func sessionCookieFor(sessionID, domain string, secure bool) *http.Cookie {
-	return &http.Cookie{
-		Name:     sessionCookieName,
-		Domain:   domain,
-		Path:     "/",
-		Value:    sessionID,
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: http.SameSiteStrictMode,
-	}
 }

@@ -73,7 +73,7 @@ func (s *idpServer) serveAPIVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// See if the user has a session set on the request.
-	sess, ok := s.sessions.getSession(r)
+	sess, ok := s.sessions.Get(r.Context())
 	if !ok {
 		deny("no session found")
 		return

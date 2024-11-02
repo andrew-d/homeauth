@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/andrew-d/homeauth/internal/openidtypes"
 	"github.com/andrew-d/homeauth/internal/templates"
 	"github.com/andrew-d/homeauth/pwhash"
+	"github.com/andrew-d/homeauth/sessions"
 )
 
 type lazyHandler struct {
@@ -71,10 +73,12 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 	srv := httptest.NewServer(lhandler)
 	tb.Cleanup(srv.Close)
 
-	smgr := &sessionManager{
-		db:      database,
-		timeNow: time.Now,
+	sstore := newDBSessionStore(database)
+	smgr, err := sessions.New(sstore)
+	if err != nil {
+		tb.Fatalf("failed to initialize session manager: %v", err)
 	}
+	smgr.Log = slogt.New(tb).With("service", "sessions")
 
 	te, err := templates.New(slogt.New(tb).With("service", "templateEngine"))
 	if err != nil {
@@ -86,6 +90,7 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		serverURL:      srv.URL,
 		serverHostname: "localhost",
 		sessions:       smgr,
+		sessionStore:   sstore,
 		db:             database,
 		hasher:         pwhash.New(2, 512*1024, 2),
 		templates:      te,
@@ -103,24 +108,27 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 func makeFakeSession(tb testing.TB, idp *idpServer, userUUID string) *http.Cookie {
 	tb.Helper()
 
+	// This is a bit of a hack, but we reach into the underlying session
+	// store and use it to create a new session.
 	sessionID := randHex(32)
-	session := &db.Session{
-		ID:       sessionID,
+	expiry := time.Now().Add(24 * time.Hour)
+	if err := idp.sessionStore.Commit(context.Background(), sessionID, &sessionData{
 		UserUUID: userUUID,
-		Expiry:   db.JSONTime{time.Now().Add(24 * time.Hour)},
+	}, expiry); err != nil {
+		tb.Fatalf("failed to create session: %v", err)
 	}
 
-	if err := idp.db.Write(func(d *data) error {
-		if d.Sessions == nil {
-			d.Sessions = make(map[string]*db.Session)
-		}
-		d.Sessions[sessionID] = session
-		return nil
-	}); err != nil {
-		tb.Fatalf("failed to write session: %v", err)
+	cookie := &http.Cookie{
+		Name:     idp.sessions.CookieOpts.Name,
+		Value:    sessionID,
+		Path:     idp.sessions.CookieOpts.Path,
+		Domain:   idp.sessions.CookieOpts.Domain,
+		Secure:   idp.sessions.CookieOpts.Secure,
+		HttpOnly: idp.sessions.CookieOpts.HttpOnly,
+		SameSite: idp.sessions.CookieOpts.SameSite,
+		MaxAge:   int(time.Until(expiry).Round(time.Second).Seconds()),
 	}
-
-	return sessionCookieFor(sessionID, "", false)
+	return cookie
 }
 
 func TestOIDCFlow(t *testing.T) {

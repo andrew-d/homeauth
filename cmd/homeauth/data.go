@@ -8,9 +8,11 @@ type data struct {
 	MagicLinks    map[string]*db.MagicLoginLink       // keyed by MagicLoginLink.Token
 	OAuthCodes    map[string]*db.OAuthCode            // keyed by OAuthCode.Code
 	PendingEmails map[string]*db.PendingEmail         // keyed by PendingEmail.ID
-	Sessions      map[string]*db.Session              // keyed by Session.ID
 	Users         map[string]*db.User                 // keyed by User.UUID
 	WebAuthnCreds map[string][]*db.WebAuthnCredential // keyed by User.UUID
+
+	// Session store
+	Sessions map[string]sessionStoreData // keyed by the hash of the session token
 
 	// Configuration
 	Config config
