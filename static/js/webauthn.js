@@ -207,14 +207,20 @@
         return r.json();
       })
       .then((data) => {
+        const { options, session } = data;
+
         // Un-base64 the challenge and user ID
-        data = translateSessionData(data);
+        const toptions = translateSessionData(options);
 
         // Call the navigator.credentials.get method to begin logging in.
-        console.log("calling navigator.credentials.get with:", data);
-        return navigator.credentials.get(data);
+        console.log("calling navigator.credentials.get with:", toptions);
+        return Promise.all([
+          navigator.credentials.get(toptions),
+          session,
+        ]);
       })
-      .then((cred) => {
+      .then((promises) => {
+        const [ cred, session ] = promises;
         console.log("got credential:", cred);
 
         // 'response' is of type AuthenticatorAssertionResponse, since per MDN:
@@ -238,7 +244,10 @@
 
         // Resolve the promise with the credential, so that the caller can
         // transmit it to the server in an appropriate method.
-        return newCred;
+        return {
+          credential: newCred,
+          session: session,
+        };
       })
       .catch((err) => {
         console.error("error:", err);

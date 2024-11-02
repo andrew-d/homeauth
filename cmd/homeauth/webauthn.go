@@ -3,32 +3,23 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/csrf"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 func (s *idpServer) serveWebauthnBeginLogin(w http.ResponseWriter, r *http.Request) {
-	// Use sessionFromContextOpts to allow unauthenticated sessions.
-	session, ok := s.sessionFromContextOpts(r.Context(), sessionFromContextOpts{
-		AllowUnauthenticated: true,
-	})
-	if !ok {
-		panic("expected unauthenticated session to exist")
-	}
-
-	s.logger.Debug("beginning WebAuthn login",
-		"unauthenticated_session_id", session.ID,
-	)
+	s.logger.Debug("beginning WebAuthn login")
 
 	var requestBody struct {
 		Username string `json:"username"`
@@ -63,57 +54,43 @@ func (s *idpServer) serveWebauthnBeginLogin(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Store the session data in the session, and persist it.
-	if err := s.db.Write(func(data *data) error {
-		session = data.Sessions[session.ID] // re-load the session
-		session.WebAuthnSession = sessionData
-		return nil
-	}); err != nil {
-		s.logger.Error("failed to store session data", errAttr(err))
+	encodedSession, err := s.encodeWebAuthnSession(user.Email, sessionData)
+	if err != nil {
+		s.logger.Error("failed to encode WebAuthn session data", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	// Return the registration data to the client.
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(options); err != nil {
-		s.logger.Error("failed to encode options", errAttr(err))
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"options": options,
+		"session": encodedSession,
+	}); err != nil {
+		s.logger.Error("failed to JSON-encode WebAuthn response", errAttr(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 }
 
 func (s *idpServer) servePostLoginWebauthn(w http.ResponseWriter, r *http.Request, user *db.User) {
-	// Use sessionFromContextOpts to allow unauthenticated sessions.
-	session, ok := s.sessionFromContextOpts(r.Context(), sessionFromContextOpts{
-		AllowUnauthenticated: true,
-	})
-	if !ok {
-		panic("expected unauthenticated session to exist")
+	// Decode the session data from the form.
+	encryptedSession := r.FormValue("webauthn_session")
+	if encryptedSession == "" {
+		s.logger.Error("missing webauthn_session")
+		http.Error(w, "missing webauthn_session", http.StatusBadRequest)
+		return
 	}
-
-	s.logger.Debug("finishing WebAuthn login",
-		"unauthenticated_session_id", session.ID,
-		"user", user.Email,
-		"session_has_webauthn", session.WebAuthnSession != nil,
-	)
-
-	// If this session doesn't have a WebAuthn session, something is wrong;
-	// just redirect the user back to the login page (while preserving the 'next' URL parameter).
-	if session.WebAuthnSession == nil {
-		vals := url.Values{}
-		if nn := r.FormValue("next"); nn != "" {
-			vals.Set("next", nn)
-		}
-
-		s.logger.Warn("session missing WebAuthn session; redirecting to login")
-		http.Redirect(w, r, "/login?="+vals.Encode(), http.StatusSeeOther)
+	var sessionData webauthn.SessionData
+	if err := s.decodeWebAuthnSession(&sessionData, user.Email, encryptedSession); err != nil {
+		s.logger.Error("failed to decode WebAuthn session", errAttr(err))
+		http.Error(w, "invalid webauthn_session", http.StatusBadRequest)
 		return
 	}
 
-	var (
-		wuser *webAuthnUser
-	)
+	s.logger.Debug("finishing WebAuthn login", "user", user.Email)
+
+	var wuser *webAuthnUser
 	s.db.Read(func(data *data) {
 		wuser = s.makeWebAuthnUser(data, user)
 	})
@@ -136,7 +113,7 @@ func (s *idpServer) servePostLoginWebauthn(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	cred, err := s.webAuthn.ValidateLogin(wuser, *session.WebAuthnSession, par)
+	cred, err := s.webAuthn.ValidateLogin(wuser, sessionData, par)
 	if err != nil {
 		s.logger.Error("failed to validate webauthn response", errAttr(err))
 		http.Error(w, "invalid webauthn_response", http.StatusBadRequest)
@@ -182,6 +159,75 @@ func (s *idpServer) servePostLoginWebauthn(w http.ResponseWriter, r *http.Reques
 	}
 
 	http.Redirect(w, r, s.getNextURL(r), http.StatusSeeOther)
+}
+
+// appendWebAuthnSessionAD appends the associated data for an encrypted
+// WebAuthn session to out.
+//
+// The associated data that we use to includes a fixed string and then the
+// user's email, which adds further protection against session data being
+// confused between users.
+func appendWebAuthnSessionAD(out []byte, user string) []byte {
+	out = append(out, []byte("webauthn-session-data\x00")...)
+	out = append(out, []byte(user)...)
+	return out
+}
+
+func (s *idpServer) encodeWebAuthnSession(user string, sessionData *webauthn.SessionData) (string, error) {
+	// Encrypt the session data and send it to the client; we expect that
+	// the client will return it as-is without modification during the
+	// login POST request.
+	sessionBytes, err := json.Marshal(sessionData)
+	if err != nil {
+		return "", fmt.Errorf("marshaling session data: %w", err)
+	}
+
+	// Generate random nonce; should never fail because rand.Read doesn't
+	// return an error on modern systems / with modern Go.
+	var nonce [chacha20poly1305.NonceSizeX]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		panic(err)
+	}
+
+	// Encrypt, then append nonce to encrypted bytes.
+	associatedData := appendWebAuthnSessionAD(nil, user)
+	encBytes := s.webAuthnAEAD.Seal(sessionBytes[:0], nonce[:], sessionBytes, associatedData)
+	encBytes = append(encBytes, nonce[:]...)
+
+	// Encode to base64
+	b64 := base64.URLEncoding.EncodeToString(encBytes)
+	return b64, nil
+}
+
+func (s *idpServer) decodeWebAuthnSession(into *webauthn.SessionData, user, encoded string) error {
+	encBytes, err := base64.URLEncoding.DecodeString(encoded)
+	if err != nil {
+		return fmt.Errorf("decoding base64: %w", err)
+	}
+
+	// Remove nonce from the end of the data
+	if len(encBytes) <= chacha20poly1305.NonceSizeX {
+		s.logger.Error("invalid webauthn_session: too short",
+			"length", len(encBytes),
+			"nonce_size", chacha20poly1305.NonceSizeX,
+		)
+		return fmt.Errorf("invalid WebAuthn session: too short")
+	}
+	nonce := encBytes[len(encBytes)-chacha20poly1305.NonceSizeX:]
+	encBytes = encBytes[:len(encBytes)-chacha20poly1305.NonceSizeX]
+
+	// Decrypt the session data.
+	associatedData := appendWebAuthnSessionAD(nil, user)
+	plaintext, err := s.webAuthnAEAD.Open(encBytes[:0], nonce[:], encBytes, associatedData)
+	if err != nil {
+		return fmt.Errorf("decrypting WebAuthn session data: %w", err)
+	}
+
+	// Deserialize the session data.
+	if err := json.Unmarshal(plaintext, into); err != nil {
+		return fmt.Errorf("unmarshaling WebAuthn session data: %w", err)
+	}
+	return nil
 }
 
 func (s *idpServer) serveWebAuthn(w http.ResponseWriter, r *http.Request) {
