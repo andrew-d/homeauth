@@ -1,12 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/pwhash"
+	"golang.org/x/net/html"
 )
 
 func TestValidateRedirectURI(t *testing.T) {
@@ -163,4 +167,127 @@ func TestPasswordLogin(t *testing.T) {
 			t.Errorf("expected session for user test-user, got %q", sess.UserUUID)
 		}
 	})
+}
+
+func TestServeAccount(t *testing.T) {
+	idp, server := newTestServer(t)
+	client := getTestClient(t, server)
+
+	// Create a few sessions for the fake user
+	const numOtherSessions = 5
+	for i := 0; i < numOtherSessions; i++ {
+		makeFakeSession(t, idp, "test-user")
+	}
+
+	// Now fetch the /account page with a final new session; it should
+	// display the number of other sessions we created above.
+	resp := client.Get(server.URL+"/account", withCookie(makeFakeSession(t, idp, "test-user")))
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status code: got %d, want 200", resp.StatusCode)
+	}
+
+	// Check that the number of other sessions is displayed
+	page, err := html.Parse(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to parse HTML: %v", err)
+	}
+
+	assertTableRow(t, page, []string{"# Sessions", fmt.Sprint(numOtherSessions + 1)})
+}
+
+func assertTableRow(tb testing.TB, page *html.Node, cols []string) {
+	tb.Helper()
+
+	// extractText recursively extracts and concatenates all text nodes
+	// under a given node.
+	var extractText func(*html.Node) string
+	extractText = func(n *html.Node) string {
+		// If this is a text node, extract the text
+		if n.Type == html.TextNode {
+			return strings.TrimSpace(n.Data)
+		}
+
+		// Traverse the child nodes
+		var text string
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			text += extractText(c)
+		}
+		return text
+	}
+
+	// extractColumns returns the text (per extractText) for all columns in
+	// the given node. A column is either a <td> element, a <th> element,
+	// or a <div> element with the class "column".
+	var extractColumns func(*html.Node) []string
+	extractColumns = func(n *html.Node) []string {
+		// If this is a column, extract the text
+		if n.Type == html.ElementNode {
+			switch {
+			case n.Data == "td":
+				return []string{extractText(n)}
+			case n.Data == "th":
+				return []string{extractText(n)}
+			case n.Data == "div" && nodeHasClass(n, "column"):
+				return []string{extractText(n)}
+			}
+		}
+
+		// Traverse the child nodes
+		var cols []string
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			cols = append(cols, extractColumns(c)...)
+		}
+		return cols
+	}
+
+	var (
+		found       bool             // did we find the right row?
+		allCols     [][]string       // all columns in the table; for debugging
+		processNode func(*html.Node) // recursive function processor
+	)
+	processNode = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			var rowCols []string
+			switch {
+			case n.Data == "tr":
+				rowCols = extractColumns(n)
+			case n.Data == "div" && nodeHasClass(n, "row"):
+				rowCols = extractColumns(n)
+			}
+
+			if len(rowCols) > 0 {
+				allCols = append(allCols, rowCols)
+				if slices.Equal(rowCols, cols) {
+					found = true
+				}
+			}
+		}
+		// traverse the child nodes
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			processNode(c)
+		}
+	}
+	processNode(page)
+
+	// Log all columns before we fail.
+	for _, col := range allCols {
+		tb.Logf("table row: %q", col)
+	}
+	if !found {
+		tb.Fatalf("table row %q not found", cols)
+	}
+}
+
+func nodeHasClass(n *html.Node, class string) bool {
+	for _, attr := range n.Attr {
+		if attr.Key != "class" {
+			continue
+		}
+
+		classVals := strings.Fields(attr.Val)
+		if slices.Contains(classVals, class) {
+			return true
+		}
+	}
+	return false
 }
