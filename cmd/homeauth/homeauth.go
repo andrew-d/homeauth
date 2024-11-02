@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/subtle"
@@ -29,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/csrf"
 	flag "github.com/spf13/pflag"
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/andrew-d/homeauth/internal/buildtags"
 	"github.com/andrew-d/homeauth/internal/db"
@@ -81,12 +83,6 @@ func main() {
 		smgr.domain = data.Config.CookieDomain
 	})
 
-	wconfig := makeWebAuthnConfig(*serverURL)
-	webAuthn, err := webauthn.New(wconfig)
-	if err != nil {
-		fatal(logger, "failed to initialize WebAuthn", errAttr(err))
-	}
-
 	te, err := templates.New(logger.With(slog.String("service", "templateEngine")))
 	if err != nil {
 		fatal(logger, "failed to initialize templates", errAttr(err))
@@ -99,7 +95,6 @@ func main() {
 		sessions:       smgr,
 		db:             db,
 		hasher:         hasher,
-		webAuthn:       webAuthn,
 		triggerEmailCh: make(chan struct{}, 1),
 		templates:      te,
 	}
@@ -177,12 +172,45 @@ type idpServer struct {
 	db             *jsonfile.JSONFile[data]
 	sessions       *sessionManager
 	hasher         *pwhash.Hasher
-	webAuthn       *webauthn.WebAuthn
 	triggerEmailCh chan struct{}
 	templates      templates.TemplateEngine
+
+	// webAuthn is the interface for performing WebAuthn operations.
+	webAuthn *webauthn.WebAuthn
+
+	// webAuthnAEAD is an AEAD used to encrypt the WebAuthn session data
+	// used during login. Before a user logs in, they don't have a session
+	// and thus don't have a session cookie that we can use to store the
+	// session data.
+	//
+	// We could use a cookie to store the session data, but we don't need
+	// to since we control the client-side code. Instead, we encrypt the
+	// session data with a key that is stored on the server and send it to
+	// the client, who must send it back in a hidden form field. This way,
+	// the client can't tamper with the session data, but we don't need to
+	// store any state server-side during logins.
+	webAuthnAEAD cipher.AEAD
 }
 
+// initializeConfig will initialize various objects and configuration fields in
+// the idpServer, reading from the database, generating keys if necessary, and
+// validating configuration that is present.
 func (s *idpServer) initializeConfig() error {
+	// Generate a random key to encrypt WebAuthn session data. It's fine if
+	// this is not persisted, since it's only used during login, and it's
+	// fine if in-progress logins fail if the server restarts. In most
+	// cases, the user won't even notice since the encrypted value is only
+	// "live" for as long as it takes to complete the passkey login.
+	var webAuthnKey [chacha20poly1305.KeySize]byte
+	if _, err := rand.Read(webAuthnKey[:]); err != nil {
+		return fmt.Errorf("failed to generate WebAuthn key: %w", err)
+	}
+	if aead, err := chacha20poly1305.NewX(webAuthnKey[:]); err != nil {
+		return fmt.Errorf("failed to create AEAD for WebAuthn key: %w", err)
+	} else {
+		s.webAuthnAEAD = aead
+	}
+
 	// Verify the config in the database.
 	var errs []error
 	if err := s.db.Write(func(data *data) error {
@@ -212,6 +240,14 @@ func (s *idpServer) initializeConfig() error {
 		return nil
 	}); err != nil {
 		errs = append(errs, err)
+	}
+
+	wconfig := makeWebAuthnConfig(s.serverURL)
+
+	var err error
+	s.webAuthn, err = webauthn.New(wconfig)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("initializing WebAuthn: %w", err))
 	}
 
 	return errors.Join(errs...)

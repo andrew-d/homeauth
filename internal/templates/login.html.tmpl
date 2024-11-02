@@ -17,6 +17,7 @@
               <input type="password" name="password" placeholder="Enter your password">
 
               <input type="hidden" name="webauthn_response" id="webauthn-response" value="">
+              <input type="hidden" name="webauthn_session" id="webauthn-session" value="">
               {{ .csrfField }}
             </fieldset>
           </form>
@@ -44,9 +45,12 @@
       // Get the entered username (email address).
       const username = document.querySelector('input[name="username"]').value;
 
-      window.homeauth.doLogin(username).then((cred) => {
+      window.homeauth.doLogin(username).then((response) => {
+        const { credential, session } = response;
+
         // Update the form field with the credential response and submit it.
-        document.getElementById('webauthn-response').value = JSON.stringify(cred);
+        document.getElementById('webauthn-response').value = JSON.stringify(credential);
+        document.getElementById('webauthn-session').value = session;
 
         // We need a 'via' field to tell the server that this is a WebAuthn
         // login. Create an element named that and append it to the form before submitting.

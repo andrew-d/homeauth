@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/neilotoole/slogt"
 
 	"github.com/andrew-d/homeauth/internal/db"
@@ -77,12 +76,6 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		timeNow: time.Now,
 	}
 
-	wconfig := makeWebAuthnConfig(srv.URL)
-	webAuthn, err := webauthn.New(wconfig)
-	if err != nil {
-		tb.Fatalf("failed to create WebAuthn config: %v", err)
-	}
-
 	te, err := templates.New(slogt.New(tb).With("service", "templateEngine"))
 	if err != nil {
 		tb.Fatalf("failed to initialize template engine: %v", err)
@@ -95,7 +88,6 @@ func newTestServer(tb testing.TB) (*idpServer, *httptest.Server) {
 		sessions:       smgr,
 		db:             database,
 		hasher:         pwhash.New(2, 512*1024, 2),
-		webAuthn:       webAuthn,
 		templates:      te,
 	}
 	if err := idp.initializeConfig(); err != nil {
