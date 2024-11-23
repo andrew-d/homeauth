@@ -36,15 +36,16 @@ import (
 	"github.com/andrew-d/homeauth/internal/db"
 	"github.com/andrew-d/homeauth/internal/jsonfile"
 	"github.com/andrew-d/homeauth/internal/templates"
+	"github.com/andrew-d/homeauth/listenx"
 	"github.com/andrew-d/homeauth/pwhash"
 	"github.com/andrew-d/homeauth/static"
 )
 
 var (
-	port      = flag.IntP("port", "p", 8080, "Port to listen on")
-	serverURL = flag.String("server-url", fmt.Sprintf("http://localhost:%d", *port), "Public URL of the server")
-	dbPath    = flag.String("db", "homeauth.json", "Path to the database file")
-	verbose   = flag.BoolP("verbose", "v", false, "Enable verbose logging")
+	listen    = flag.StringP("listen", "l", "tcp://127.0.0.1:8080", "listen address (e.g. tcp://ip:port, unix://path, systemd://1, etc.)")
+	serverURL = flag.String("server-url", "http://localhost:8080", "public URL of the server")
+	dbPath    = flag.String("db", "homeauth.json", "path to the database file")
+	verbose   = flag.BoolP("verbose", "v", false, "enable verbose logging")
 )
 
 func main() {
@@ -103,16 +104,16 @@ func main() {
 	}
 	idp.printConfig()
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	ln, err := listenx.Listen(*listen)
 	if err != nil {
-		fatal(logger, "failed to listen", "port", *port, errAttr(err))
+		fatal(logger, "failed to listen", "spec", *listen, errAttr(err))
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *port),
+		Addr:    ln.Addr().String(),
 		Handler: idp.httpHandler(),
 	}
 	errCh := make(chan error, 1)
@@ -126,7 +127,7 @@ func main() {
 	go idp.runEmailLoop(ctx)
 
 	logger.Info("homeauth listening, press Ctrl+C to stop",
-		"addr", fmt.Sprintf("http://localhost:%d/", *port))
+		"addr", fmt.Sprintf("http://%s/", srv.Addr))
 	select {
 	case err := <-errCh:
 		fatal(logger, "error starting server", errAttr(err))
