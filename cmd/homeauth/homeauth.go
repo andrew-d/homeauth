@@ -43,10 +43,11 @@ import (
 )
 
 var (
-	listen    = flag.StringP("listen", "l", "tcp://127.0.0.1:8080", "listen address (e.g. tcp://ip:port, unix://path, systemd://1, etc.)")
-	serverURL = flag.String("server-url", "http://localhost:8080", "public URL of the server")
-	dbPath    = flag.String("db", "homeauth.json", "path to the database file")
-	verbose   = flag.BoolP("verbose", "v", false, "enable verbose logging")
+	listen        = flag.StringP("listen", "l", "tcp://127.0.0.1:8080", "listen address (e.g. tcp://ip:port, unix://path, systemd://1, etc.)")
+	serverURL     = flag.String("server-url", "http://localhost:8080", "public URL of the server")
+	dbPath        = flag.String("db", "homeauth.json", "path to the database file")
+	cookiesSecure = flag.Bool("cookies-secure", !buildtags.IsDev, "whether cookies should be set with the Secure flag")
+	verbose       = flag.BoolP("verbose", "v", false, "enable verbose logging")
 )
 
 func main() {
@@ -198,7 +199,12 @@ type idpServer struct {
 	// cookiesSecure is whether cookies set by this service should have the
 	// Secure flag set. This will be false if we're in dev mode or if the
 	// server's hostname is 'localhost' or a localhost IP address.
-	cookiesSecure bool
+	//
+	// This is a trinary field so that we can distinguish between "insecure
+	// cookies" and "we haven't yet set a value".
+	//
+	// 0 means "unset", 1 means "secure", and 2 means "insecure".
+	cookiesSecure int
 }
 
 // initializeConfig will initialize various objects and configuration fields in
@@ -220,15 +226,18 @@ func (s *idpServer) initializeConfig() error {
 		s.webAuthnAEAD = aead
 	}
 
-	if buildtags.IsDev {
-		s.cookiesSecure = false
-	} else if slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, s.serverHostname) {
-		// TODO: not enough if e.g. running behind Caddy
-		s.cookiesSecure = false
-	} else {
-		s.cookiesSecure = true
+	if s.cookiesSecure == 0 {
+		// If the server URL is localhost or an IP address, we can't set
+		// Secure cookies.
+		if slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, s.serverHostname) {
+			s.cookiesSecure = 2
+		} else if *cookiesSecure {
+			s.cookiesSecure = 1
+		} else {
+			s.cookiesSecure = 2 // flag was false
+		}
 	}
-	s.sessions.CookieOpts.Secure = s.cookiesSecure
+	s.sessions.CookieOpts.Secure = s.cookiesSecure == 1
 
 	// Verify the config in the database.
 	var errs []error
@@ -330,7 +339,7 @@ func (s *idpServer) httpHandler() http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(csrf.Protect(
 			csrfKey,
-			csrf.Secure(s.cookiesSecure),
+			csrf.Secure(s.cookiesSecure == 1),
 			csrf.Path("/"), // Set cookie on all paths
 			csrf.RequestHeader("X-CSRF-Token"),
 			csrf.ErrorHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
