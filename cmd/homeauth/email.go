@@ -211,18 +211,43 @@ func (s *idpServer) servePostLoginEmail(w http.ResponseWriter, r *http.Request, 
 // for them to log in. Most email clients have a fairly restrictive set of
 // allowed formatting for emails, so we keep this simple.
 //
-// TODO: make this look a bit nicer
+// TODO: this doesn't look too bad (borrowed from somewhere), but should
+// ideally better match the styling and colour of the rest of the application
 var emailBodyTemplate = template.Must(template.New("email").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<title>homeauth login</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login to Your Account</title>
 </head>
-<body>
-<p>Use this link to log in:</p>
-<p><a href="{{ .MagicURL }}">click here</a></p>
+<body style="margin: 0; padding: 0; background-color: #f6f9fc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 40px 20px;">
+        <div style="background-color: white; border-radius: 8px; padding: 40px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h1 style="margin: 0 0 20px; color: #1a1a1a; font-size: 24px; font-weight: 600;">Log in to homeauth</h1>
+
+            <p style="margin: 0 0 24px; color: #4a5568; font-size: 16px; line-height: 24px;">
+                Click the button below to log in to your account. This link will expire in 10 minutes and can only be used once.
+            </p>
+
+            <div style="text-align: center; margin: 32px 0;">
+                <a href="{{.MagicURL}}" style="display: inline-block; background-color: #4f46e5; color: white; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500; font-size: 16px;">Log in to Your Account</a>
+            </div>
+
+            <p style="margin: 24px 0 0; color: #718096; font-size: 14px; line-height: 20px;">
+                If you didn't request this login link, you can safely ignore this email.
+            </p>
+
+            <hr style="margin: 24px 0; border: none; border-top: 1px solid #e2e8f0;">
+
+            <p style="margin: 0; color: #718096; font-size: 14px; line-height: 20px;">
+                If the button above doesn't work, copy and paste this URL into your browser:<br>
+                <span style="color: #4a5568; word-break: break-all;">{{.MagicURL}}</span>
+            </p>
+        </div>
+    </div>
 </body>
-</html>`))
+</html>
+`))
 
 func makeEmailBody(magicURL string) string {
 	var buf bytes.Buffer
