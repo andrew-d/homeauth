@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -43,13 +44,28 @@ func TestCaddy(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
+	// Look in $PATH for the Caddy binary, along with /usr/local/bin if
+	// we're on Linux or macOS (where it might be installed by the user).
 	caddyBin, err := exec.LookPath("caddy")
 	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			t.Skip("caddy not found in PATH")
+		var found bool
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+			// Confirm that the file exists, is a regular file, and
+			// is executable.
+			st, err := os.Stat("/usr/local/bin/caddy")
+			if err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0111 != 0 {
+				caddyBin = "/usr/local/bin/caddy"
+				found = true
+			}
 		}
 
-		t.Fatalf("caddy not found in PATH: %v", err)
+		if !found {
+			if errors.Is(err, exec.ErrNotFound) {
+				t.Skip("caddy not found in PATH")
+			}
+
+			t.Fatalf("caddy not found in PATH: %v", err)
+		}
 	}
 
 	bin := buildHomeauth(t)

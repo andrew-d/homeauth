@@ -14,6 +14,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
 
+      - name: Install integration test dependencies
+        run: |
+          ./integration/misc/install-caddy.sh
+
       - name: Run all unit tests
         run: go test ./...
 
