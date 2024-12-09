@@ -98,6 +98,7 @@ func startHomeauth(tb testing.TB, bin string, opts startOptions) (context.Contex
 		"--verbose",
 		"--listen", "fd://3",
 		"--db", dbPath,
+		"--cookies-secure=false",
 	}
 	if opts.ServerURL != "" {
 		args = append(args, "--server-url", opts.ServerURL)
@@ -188,6 +189,9 @@ func (t *tester) loginPassword(user, password string) {
 		t.tb.Fatalf("making POST request to /login: %v", err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.tb.Fatalf("got status %d, want 200", resp.StatusCode)
+	}
 
 	// Ensure that the user is authenticated by fetching the /account page
 	resp = t.MustGet("/account")
@@ -196,7 +200,7 @@ func (t *tester) loginPassword(user, password string) {
 	}
 	body, _ = io.ReadAll(resp.Body)
 	if !bytes.Contains(body, []byte("Account Information")) {
-		t.tb.Fatalf("expected 'Account Information' in body")
+		t.tb.Fatalf("expected 'Account Information' in body; got:\n%s", body)
 	}
 }
 
