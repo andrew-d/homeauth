@@ -16,7 +16,7 @@ require (
 	github.com/jordan-wright/email v4.0.1-0.20210109023952-943e75fe5223+incompatible
 	github.com/neilotoole/slogt v1.1.0
 	github.com/spf13/pflag v1.0.5
-	golang.org/x/crypto v0.27.0
+	golang.org/x/crypto v0.31.0
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0
 	golang.org/x/net v0.29.0
 )
@@ -29,5 +29,5 @@ require (
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/sys v0.25.0 // indirect
+	golang.org/x/sys v0.28.0 // indirect
 )
