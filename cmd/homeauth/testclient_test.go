@@ -85,6 +85,19 @@ func (c *testClient) SetCookies(u string, cookies ...*http.Cookie) {
 	c.client.Jar.SetCookies(uu, cookies)
 }
 
+// ClearAllCookies clears all cookies from this client's cookie jar.
+func (c *testClient) ClearAllCookies() {
+	// We can't really clear all cookies from the jar, so we just create a
+	// new one.
+	jar, err := cookiejar.New(&cookiejar.Options{
+		PublicSuffixList: publicsuffix.List,
+	})
+	if err != nil {
+		c.tb.Fatalf("failed to create cookie jar: %v", err)
+	}
+	c.client.Jar = jar
+}
+
 // MakeRequest is the underlying method for making requests to the test server.
 //
 // It will create a request with the provided method and path, will set the
