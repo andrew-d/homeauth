@@ -179,6 +179,79 @@ func TestPasswordLogin(t *testing.T) {
 		// ... and that it's for the right user.
 		assertSessionFor(t, idp, cookie.Value, "test-user")
 	})
+
+	// Verify that if a user's password is changed, their existing sessions
+	// are no longer valid.
+	//
+	// Note that, while we don't have a password change endpoint, we still
+	// want to invalidate sessions if the password is changed in the config.
+	t.Run("PasswordChanged", func(t *testing.T) {
+		// Remove all cookies from the jar to remove any sessions.
+		client.ClearAllCookies()
+
+		resp := client.Get(server.URL + "/login")
+		assertStatus(t, resp, http.StatusOK)
+		csrfToken := extractCSRFTokenFromResponse(t, resp)
+
+		form := url.Values{
+			"username": {"andrew@du.nham.ca"},
+			"password": {"hunter2"},
+			"via":      {"password"},
+		}
+		resp = client.PostForm(server.URL+"/login?next=/fortesting", form, withCSRFToken(csrfToken))
+		assertStatus(t, resp, http.StatusSeeOther)
+		if loc := resp.Header.Get("Location"); loc != "/fortesting" {
+			t.Fatalf("expected redirect to /fortesting, got %q", loc)
+		}
+
+		// Verify that we have a session cookie...
+		cookie := resp.Cookies()[0]
+		if cookie.Name != "session" {
+			t.Fatalf("expected session cookie, got %v", cookie)
+		}
+
+		// ... and that it's for the right user.
+		assertSessionFor(t, idp, cookie.Value, "test-user")
+
+		// Now, change the user's password.
+		newPwhash := hasher.HashString("hunter3")
+		if err := idp.db.Write(func(d *data) error {
+			d.Users["test-user"].PasswordHash = string(newPwhash)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify that the session cookie is no longer valid. We make a
+		// request to a valid endpoint and expect a redirect to the
+		// login page.
+		resp = client.Get(server.URL+"/account", withCookie(cookie))
+		assertStatus(t, resp, http.StatusSeeOther)
+		const wantRedirect = `/login?next=%2Faccount`
+		if loc := resp.Header.Get("Location"); loc != wantRedirect {
+			t.Fatalf("got redirect to %q, want %q", loc, wantRedirect)
+		}
+
+		// Logging in again should result in a valid session.
+		resp = client.Get(server.URL + "/login")
+		assertStatus(t, resp, http.StatusOK)
+		csrfToken = extractCSRFTokenFromResponse(t, resp)
+
+		form = url.Values{
+			"username": {"andrew@du.nham.ca"},
+			"password": {"hunter3"},
+			"via":      {"password"},
+		}
+		resp = client.PostForm(server.URL+"/login?next=/account", form, withCSRFToken(csrfToken))
+		assertStatus(t, resp, http.StatusSeeOther)
+		if loc := resp.Header.Get("Location"); loc != "/account" {
+			t.Fatalf("expected redirect to /account, got %q", loc)
+		}
+
+		// And a request to the /account page should now succeed.
+		resp = client.Get(server.URL + "/account")
+		assertStatus(t, resp, http.StatusOK)
+	})
 }
 
 func TestServeAccount(t *testing.T) {

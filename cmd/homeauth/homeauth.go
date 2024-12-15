@@ -698,6 +698,7 @@ func (s *idpServer) loginUserSession(w http.ResponseWriter, r *http.Request, use
 	// TODO: double-check if this allows session fixation
 	err := s.sessions.Update(r.Context(), func(sd *sessionData) error {
 		sd.UserUUID = user.UUID
+		sd.PasswordBinding = getPasswordBinding(user)
 		return nil
 	})
 	if err != nil {

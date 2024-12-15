@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"log/slog"
 	"net/http"
 
@@ -12,6 +14,14 @@ import (
 type sessionData struct {
 	UserUUID        string `json:"u,omitempty"`
 	WebAuthnSession []byte `json:",omitempty"`
+
+	// PasswordBinding is an (optional) hash of the user's password hash,
+	// that binds this session to the current password.
+	//
+	// It is only set if the user logged in with a password, and is used to
+	// verify that the user's password hasn't changed since the session was
+	// created.
+	PasswordBinding string `json:"pb,omitempty"`
 }
 
 // IsAuthenticated returns whether a session represents an authenticated user.
@@ -40,12 +50,21 @@ func (s *idpServer) requireLogin(errHandler http.Handler) func(http.Handler) htt
 			}
 
 			// Verify that the user exists
-			var validUser bool
+			var user *db.User
 			s.db.Read(func(d *data) {
-				_, validUser = d.Users[session.UserUUID]
+				user = d.Users[session.UserUUID]
 			})
-			if !validUser {
+			if user == nil {
 				s.logger.Warn("session refers to non-existent user",
+					"user_uuid", session.UserUUID)
+				errHandler.ServeHTTP(w, r)
+				return
+			}
+
+			// If the user logged in with a password, verify that the password
+			// hash hasn't changed since the session was created.
+			if session.PasswordBinding != "" && getPasswordBinding(user) != session.PasswordBinding {
+				s.logger.Warn("password hash has changed since session was created",
 					"user_uuid", session.UserUUID)
 				errHandler.ServeHTTP(w, r)
 				return
@@ -55,6 +74,22 @@ func (s *idpServer) requireLogin(errHandler http.Handler) func(http.Handler) htt
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func getPasswordBinding(user *db.User) string {
+	// If the user has no password, we don't need to bind the session to it.
+	if user.PasswordHash == "" {
+		return ""
+	}
+
+	// Otherwise, bind the session to the user's password hash.
+	//
+	// To avoid keeping a copy of the user's password hash around, we hash it
+	// again. This is safe because the password hash is already a hash of the
+	// user's password, so hashing it again doesn't weaken the security; we
+	// also do not need to salt it for the same reason.
+	hash := sha256.Sum256([]byte(user.PasswordHash))
+	return base64.RawStdEncoding.EncodeToString(hash[:])
 }
 
 // mustUser retrieves the current user from the provided context, as enforced
