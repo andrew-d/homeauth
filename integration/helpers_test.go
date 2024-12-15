@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -251,13 +253,6 @@ func extractCSRFToken(tb testing.TB, body []byte) string {
 	return ""
 }
 
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
-
 // unixSocketDialer is a dialer that can dial unix sockets, and exposes a
 // DialContext method.
 //
@@ -279,4 +274,41 @@ func (u unixSocketDialer) DialContext(_ context.Context, _, addr string) (net.Co
 		return nil, fmt.Errorf("unknown host %q", host)
 	}
 	return net.Dial("unix", sockPath)
+}
+
+// findBinary looks for a binary in $PATH and any platform-specific
+// directories.
+//
+// If the binary is not found, it skips the test. If another error occurs, it
+// fails the test.
+func findBinary(tb testing.TB, name string) string {
+	path, lookErr := exec.LookPath(name)
+	if lookErr == nil {
+		return path
+	}
+
+	// Look for the binary in the platform-specific directories that may
+	// not have been added to $PATH.
+	var paths []string
+	switch runtime.GOOS {
+	case "linux", "darwin":
+		paths = []string{"/usr/local/bin"}
+	}
+	for _, dir := range paths {
+		path := filepath.Join(dir, name)
+		st, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+
+		if st.Mode().IsRegular() && st.Mode().Perm()&0111 != 0 {
+			return path
+		}
+	}
+
+	if errors.Is(lookErr, exec.ErrNotFound) {
+		tb.Skipf("%s not found in PATH", name)
+	}
+	tb.Fatalf("%s not found in PATH: %v", name, lookErr)
+	return ""
 }
