@@ -16,7 +16,9 @@ jobs:
 
       - name: Install integration test dependencies
         run: |
+          sudo apt-get update
           ./integration/misc/install-caddy.sh
+          sudo apt-get install -y nginx
 
       - name: Run all unit tests
         run: go test ./...
