@@ -4,6 +4,7 @@
 # The database
 /homeauth.db*
 /homeauth.json
+/integration/homeauth.json
 
 # Secrets
 /client_secret*.json
