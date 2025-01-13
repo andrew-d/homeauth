@@ -204,7 +204,7 @@ the address to listen on. The following methods are supported:
 To use systemd to listen on a socket for `homeauth`, here's an example
 configuration that listens on port 8080:
 
-```systemd
+```desktop
 # in /etc/systemd/system/homeauth.socket
 [Unit]
 Description=homeauth
@@ -217,7 +217,7 @@ ListenStream=8080
 WantedBy=multi-user.target
 ```
 
-```systemd
+```desktop
 # in /etc/systemd/system/homeauth.service
 [Unit]
 Description=homeauth
