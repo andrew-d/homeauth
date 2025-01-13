@@ -13,6 +13,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/gorilla/csrf"
 	"github.com/jordan-wright/email"
 	xmaps "golang.org/x/exp/maps"
 
@@ -268,6 +269,38 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Even though we're not going to "claim" the token until the POST form
+	// auto-submits, we can still do some sanity checks here.
+	var (
+		status int
+		why    string
+		ok     bool
+	)
+	s.db.Read(func(data *data) {
+		status, why, ok = s.checkMagicLogin(data, token)
+	})
+	if !ok {
+		http.Error(w, why, status)
+		return
+	}
+
+	if err := s.templates.ExecuteTemplate(w, "login-magic.html.tmpl", map[string]any{
+		"Token":          token,
+		csrf.TemplateTag: csrf.TemplateField(r),
+	}); err != nil {
+		s.logger.Error("failed to render login-magic template", errAttr(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}
+}
+
+// servePostMagicLogin is called when the "/login/magic" endpoint is auto-submitted.
+func (s *idpServer) servePostMagicLogin(w http.ResponseWriter, r *http.Request) {
+	token := r.PostFormValue("token")
+	if token == "" {
+		http.Error(w, "missing token", http.StatusBadRequest)
+		return
+	}
+
 	// NOTE: because we want to ensure that a magic link is single-use, we
 	// do the entire operation here inside a write transaction. This
 	// ensures that nothing else can use the magic link while we're
@@ -284,29 +317,16 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 		errString string
 	)
 	if err := s.db.Write(func(data *data) error {
+		st, why, ok := s.checkMagicLogin(data, token)
+		if !ok {
+			status = st
+			errString = why
+			return nil // not an error, but we're done
+		}
+
+		// If we get here, we know this is valid
 		magic = data.MagicLinks[token]
-		if magic == nil {
-			s.logger.Warn("no such magic login", "token", token)
-			status = http.StatusUnauthorized
-			errString = "invalid token"
-			return nil
-		}
-
 		user = data.Users[magic.UserUUID]
-		if user == nil {
-			s.logger.Error("no such user for magic login", "token", token, "user_uuid", magic.UserUUID)
-			status = http.StatusInternalServerError
-			errString = "internal server error"
-			return nil
-		}
-
-		// Check that the token hasn't expired.
-		if time.Now().After(magic.Expiry.Time) {
-			s.logger.Warn("magic login expired", "token", token, "expiry", magic.Expiry, "now", time.Now())
-			status = http.StatusUnauthorized
-			errString = "expired token"
-			return nil
-		}
 
 		// Remove the magic login link from the database, now that it's
 		// been used.
@@ -355,6 +375,35 @@ func (s *idpServer) serveGetMagicLogin(w http.ResponseWriter, r *http.Request) {
 	} else {
 		http.Redirect(w, r, "/account", http.StatusSeeOther)
 	}
+}
+
+// checkMagicLogin centralizes checking whether a magic login link with the
+// given token is valid.
+//
+// It returns a boolean "ok" that indicates whether the token is valid, and if
+// not, a status code and informational message explaining why.
+//
+// If the code is not valid, this function will log.
+func (s *idpServer) checkMagicLogin(data *data, token string) (status int, why string, ok bool) {
+	magic := data.MagicLinks[token]
+	if magic == nil {
+		s.logger.Warn("no such magic login", "token", token)
+		return http.StatusUnauthorized, "invalid token", false
+	}
+
+	user := data.Users[magic.UserUUID]
+	if user == nil {
+		s.logger.Error("no such user for magic login", "token", token, "user_uuid", magic.UserUUID)
+		return http.StatusInternalServerError, "internal server error", false
+	}
+
+	// Check that the token hasn't expired.
+	if time.Now().After(magic.Expiry.Time) {
+		s.logger.Warn("magic login expired", "token", token, "expiry", magic.Expiry, "now", time.Now())
+		return http.StatusUnauthorized, "expired token", false
+	}
+
+	return 0, "", true
 }
 
 // serveGetLoginCheckEmail serves a "check your email" page after the user

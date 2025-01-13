@@ -77,8 +77,20 @@ func TestMagicLinkLogin(t *testing.T) {
 		t.Errorf("expected next URL to be /fortesting, got %q", magic.NextURL)
 	}
 
-	// ... and if we visit the magic link, we should be logged in.
+	// ... and if we visit the magic link, we should get a page that
+	// contains our token in a hidden input.
 	resp = client.Get(magicLink)
+	body, _ := io.ReadAll(resp.Body)
+
+	wantRe := regexp.MustCompile(`<input.*type="hidden".*name="token".*value="` + regexp.QuoteMeta(token) + `">`)
+	if !wantRe.Match(body) {
+		t.Errorf("expected hidden input with token %q, got %q", token, body)
+		return
+	}
+
+	// If we make a POST request to the given URL with the token, we should
+	// be redirected to the next URL.
+	resp = client.PostForm(magicLink, url.Values{"token": {token}}, withCSRFToken(csrfToken))
 	assertStatus(t, resp, http.StatusSeeOther)
 	if loc := resp.Header.Get("Location"); loc != "/fortesting" {
 		t.Fatalf("expected redirect to /fortesting, got %q", loc)

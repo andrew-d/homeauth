@@ -367,6 +367,7 @@ func (s *idpServer) httpHandler() http.Handler {
 		// Login endpoints for magic link login
 		r.Get("/login/check-email", s.serveGetLoginCheckEmail)
 		r.Get("/login/magic", s.serveGetMagicLogin)
+		r.Post("/login/magic", s.servePostMagicLogin)
 
 		// Login endpoints for WebAuthn
 		r.Post("/login/webauthn", s.serveWebauthnBeginLogin)

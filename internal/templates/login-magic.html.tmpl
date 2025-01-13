@@ -1,0 +1,30 @@
+{{ template "_layout.html.tmpl" . }}
+
+{{ define "title" }}Login Page{{ end }}
+
+{{ define "content" }}
+  <div class="container">
+    <h3>Logging you in...</h3>
+
+    <form id="login" action="/login/magic" method="POST">
+      <input type="hidden" name="token" id="token" value="{{.Token}}">
+      {{ .csrfField }}
+      <noscript>
+        <input type="submit" value="Click here to log in...">
+      </noscript>
+    </form>
+  </div>
+
+  <script>
+    // If the self-submitting form doesn't work for some reason, show a submit
+    // button after a bit.
+    setTimeout(function() {
+      var submitButton = document.createElement('input');
+      submitButton.type = 'submit';
+      submitButton.value = 'Click here to log in...';
+      document.getElementById('login').appendChild(submitButton);
+    }, 2000);
+
+    document.getElementById('login').submit();
+  </script>
+{{ end }}
