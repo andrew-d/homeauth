@@ -52,10 +52,22 @@ on. This is used to generate the redirect URLs for the OAuth2 flow, to set the
 WebAuthn origin, and a varity of other things; it should be the service that
 users of this IdP access (e.g. behind a load balancer that does TLS).
 
-You can configure the port that the server listens on with the `--port` flag,
-independent of the `--server-url` flag.
+You can configure the port that the server listens on with the `--listen` flag,
+independent of the `--server-url` flag. See the [Deployment](#deployment)
+section for more details
 
 ## Configuration
+
+When editing configuration for `homeauth`, make sure that the service is not
+running. There is no support for reloading the configuration file at runtime;
+the service must be restarted to apply changes.
+
+If you're playing around with the configuration, the build tag `dev` can be
+used; this pretty-prints the JSON configuration file. For example:
+
+```shell
+$ go run -tags dev ./cmd/homeauth [...]
+```
 
 ### OIDC Clients
 
@@ -168,3 +180,53 @@ UUID, and values are arrays of WebAuthn credentials:
   // ... additional Config omitted ...
 }
 ```
+
+## Deployment
+
+The easiest way to run `homeauth` is behind a reverse proxy that handles TLS
+termination. This is because `homeauth` does not handle TLS termination itself;
+a reverse proxy like Caddy or nginx can automatically fetch and renew TLS
+certificates from Let's Encrypt, and handle the TLS termination while proxying
+to `homeauth`.
+
+The `--listen` flag supports a variety of listening methods so that you can
+customize how `homeauth` listens for incoming connections. The general format
+is `METHOD://ADDRESS`, where `METHOD` is the listen method, and `ADDRESS` is
+the address to listen on. The following methods are supported:
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `tcp` | Listen on a TCP address | `tcp://1.2.3.4:8080` or `tcp://:9999` |
+| `unix` | Listen on a Unix socket | `unix:///var/run/homeauth.sock` |
+| `fd` | Listen on an inherited file descriptor | `fd://3` |
+| `systemd` | Listen on a systemd socket | `systemd://1` or `systemd://listener` |
+
+To use systemd to listen on a socket for `homeauth`, here's an example
+configuration that listens on port 8080:
+
+```systemd
+# in /etc/systemd/system/homeauth.socket
+[Unit]
+Description=homeauth
+
+[Socket]
+FileDescriptorName=my-listener-name
+ListenStream=8080
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```systemd
+# in /etc/systemd/system/homeauth.service
+[Unit]
+Description=homeauth
+
+[Service]
+DynamicUser=true
+ExecStart=/path/to/homeauth --db /var/lib/homeauth/homeauth.json --server-url https://auth.example.com --listen systemd://my-listener-name
+RuntimeDirectory=homeauth
+StateDirectory=homeauth
+```
+
+Then, you can start the service with `systemctl start homeauth`.
