@@ -54,3 +54,56 @@ users of this IdP access (e.g. behind a load balancer that does TLS).
 
 You can configure the port that the server listens on with the `--port` flag,
 independent of the `--server-url` flag.
+
+## Configuration
+
+### OIDC Clients
+
+Add a new entry to the `Clients` key in the database/configuration file. For
+example, to test things out with the [OIDC Playground][oplay], you
+can use the following example configuration, which contains a user with the
+password "password123", and authorizes the OIDC Playground's client ID and
+client secret (the keys in this example are the playground's default keys, and
+can be changed in the configuration):
+
+```json
+{
+  "Users": {
+    "11111111-2222-3333-4444-555555555555": {
+      "UUID": "11111111-2222-3333-4444-555555555555",
+      "Email": "test@example.com",
+      "PasswordHash": "$argon2id$v=19$m=524288,t=2,p=2$LFoLcUjj47J+8rFKTkV2Vw$cETlZXupXaGj+kuweaU8mA"
+    }
+  },
+  "Config": {
+    "CookieDomain": "localhost",
+    "Clients": {
+      "kbyuFDidLLm280LIwVFiazOqjO3ty8KH": {
+        "Name": "openidconnect.net",
+        "ClientID": "kbyuFDidLLm280LIwVFiazOqjO3ty8KH",
+        "ClientSecret": "60Op4HFM0I8ajz0WdiStAbziZ-VFQttXuxixHHs2R7r7-CW8GR79l-mmLqMhc-Sa",
+        "RedirectURIs": [
+          "https://openidconnect.net/callback"
+        ]
+      }
+    }
+  }
+}
+```
+
+[oplay]: https://openidconnect.net
+
+### Generating Password Hashes
+
+There is a `./cmd/genpassword` command that can be used to generate password
+hashes for users. For example, to generate a password hash for the password
+"password123", you can run the following command:
+
+```shell
+$ go build ./cmd/genpassword
+$ ./genpassword password123
+```
+
+The utility also offers the `-stdin` flag, which will read the password from
+stdin. This can be useful for scripting, or for securely entering a password
+without it being stored in your shell history.
