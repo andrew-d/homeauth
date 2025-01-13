@@ -11,7 +11,12 @@
           <form id="login" action="/login?next={{.Next}}" method="POST">
             <fieldset>
               <label for="username">Username</label>
-              <input type="text" name="username" placeholder="Enter your username">
+              <input type="text" name="username" placeholder="Enter your username" value="{{ .Username }}">
+
+              <input type="checkbox" name="remember" id="remember" {{ if .Username }}checked{{ end }}>
+              <label for="remember" class="label-inline">
+                <small>Remember username</small>
+              </label>
               
               <label for="password">Password</label>
               <input type="password" name="password" placeholder="Enter your password">
