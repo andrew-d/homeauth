@@ -130,9 +130,9 @@ the configuration file. For example:
   "Config": {
     "CookieDomain": "localhost",
     "Email": {
-      "FromAddress": "auth@mydomain.com",
+      "FromAddress": "auth@example.com",
       "SMTPServer": "smtp.example.com",
-      "SMTPUsername": "auth@mydomain.com",
+      "SMTPUsername": "auth@example.com",
       "SMTPPassword": "password123",
       "UseTLS": true
     }
