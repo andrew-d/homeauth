@@ -627,11 +627,21 @@ func validateRedirectURI(ru *url.URL) error {
 	return nil
 }
 
+const rememberUsernameCookieName = "remember_username"
+
 func (s *idpServer) serveGetLogin(w http.ResponseWriter, r *http.Request) {
 	// TODO: verify the 'next' parameter is a valid URL?
 
+	// If the user has a 'remember username' cookie, pre-fill the username
+	// in the login form.
+	var username string
+	if cookie, err := r.Cookie(rememberUsernameCookieName); err == nil {
+		username = cookie.Value
+	}
+
 	if err := s.templates.ExecuteTemplate(w, "login.html.tmpl", map[string]any{
 		"Next":           r.URL.Query().Get("next"),
+		"Username":       username,
 		csrf.TemplateTag: csrf.TemplateField(r),
 	}); err != nil {
 		s.logger.Error("failed to render login template", errAttr(err))
@@ -703,6 +713,39 @@ func (s *idpServer) loginUserSession(w http.ResponseWriter, r *http.Request, use
 	})
 	if err != nil {
 		return err
+	}
+
+	// If the user wants to remember their username, set a cookie.
+	if r.FormValue("remember") == "on" {
+		s.logger.Debug("setting remember username cookie", "username", user.Email)
+		http.SetCookie(w, &http.Cookie{
+			Name:  rememberUsernameCookieName,
+			Value: user.Email,
+			Path:  "/",
+
+			// TODO(andrew-d): it feels a bit ugly to be reaching
+			// into the session manager for these fields; pull them
+			// out somewhere else?
+			Domain:   s.sessions.CookieOpts.Domain,
+			HttpOnly: s.sessions.CookieOpts.HttpOnly,
+			Secure:   s.sessions.CookieOpts.Secure,
+			SameSite: s.sessions.CookieOpts.SameSite,
+
+			// Set a reasonable upper limit for "remember me" of 30 days.
+			MaxAge: 30 * 24 * 60 * 60,
+		})
+	} else if _, err := r.Cookie(rememberUsernameCookieName); err == nil {
+		// Clear any existing "remember username" cookie.
+		s.logger.Debug("clearing remember username cookie")
+		http.SetCookie(w, &http.Cookie{
+			Name:   rememberUsernameCookieName,
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
+
+			// TODO(andrew-d): don't reach into sessions manager
+			Domain: s.sessions.CookieOpts.Domain,
+		})
 	}
 
 	s.logger.Info("logged in user",
@@ -782,6 +825,15 @@ func (s *idpServer) serveLogout(w http.ResponseWriter, r *http.Request) {
 	// currently-authenticated one. This seems like the correct UX
 	// tradeoff, so that we don't e.g. invalidate a session on a user's
 	// iPhone when they log out on their laptop.
+
+	// Remove the "remember username" cookie if the user explicitly logs out.
+	http.SetCookie(w, &http.Cookie{
+		Name:   rememberUsernameCookieName,
+		Value:  "",
+		Path:   "/",
+		Domain: s.sessions.CookieOpts.Domain,
+		MaxAge: -1,
+	})
 
 	// TODO: we should use a flash message here or something
 	http.Redirect(w, r, "/login", http.StatusSeeOther)

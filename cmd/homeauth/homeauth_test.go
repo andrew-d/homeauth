@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/andrew-d/homeauth/internal/db"
+	"github.com/andrew-d/homeauth/internal/must"
 	"github.com/andrew-d/homeauth/pwhash"
 	"golang.org/x/net/html"
 )
@@ -89,13 +92,8 @@ func TestPasswordLogin(t *testing.T) {
 	idp, server := newTestServer(t)
 	client := getTestClient(t, server)
 
-	// Create a fake password for the main user. We don't use idp.hasher
-	// because it's slow; we instead create an intentionally VERY WEAK
-	// password hash just for testing.
-	hasher := pwhash.New(1, 1024, 1)
-	pwhash := hasher.HashString("hunter2")
 	if err := idp.db.Write(func(d *data) error {
-		d.Users["test-user"].PasswordHash = string(pwhash)
+		d.Users["test-user"].PasswordHash = makeInsecureWeakPassword(t, "hunter2")
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -214,9 +212,9 @@ func TestPasswordLogin(t *testing.T) {
 		assertSessionFor(t, idp, cookie.Value, "test-user")
 
 		// Now, change the user's password.
-		newPwhash := hasher.HashString("hunter3")
+		newPwhash := makeInsecureWeakPassword(t, "hunter3")
 		if err := idp.db.Write(func(d *data) error {
-			d.Users["test-user"].PasswordHash = string(newPwhash)
+			d.Users["test-user"].PasswordHash = newPwhash
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -252,6 +250,196 @@ func TestPasswordLogin(t *testing.T) {
 		resp = client.Get(server.URL + "/account")
 		assertStatus(t, resp, http.StatusOK)
 	})
+}
+
+func TestLoginRememberMe(t *testing.T) {
+	idp, server := newTestServer(t)
+	client := getTestClient(t, server)
+
+	// Create a fake password for the main user. We don't use idp.hasher
+	// because it's slow; we instead create an intentionally VERY WEAK
+	// password hash just for testing.
+	if err := idp.db.Write(func(d *data) error {
+		d.Users["test-user"].PasswordHash = makeInsecureWeakPassword(t, "hunter2")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Logging in with the "remember me" checkbox checked should result in
+	// a remember_username cookie.
+	resp := client.Get(server.URL + "/login")
+	assertStatus(t, resp, http.StatusOK)
+	csrfToken := extractCSRFTokenFromResponse(t, resp)
+
+	form := url.Values{
+		"username": {"andrew@du.nham.ca"},
+		"password": {"hunter2"},
+		"via":      {"password"},
+		"remember": {"on"},
+	}
+	resp = client.PostForm(server.URL+"/login?next=/fortesting", form, withCSRFToken(csrfToken))
+	assertStatus(t, resp, http.StatusSeeOther)
+	if loc := resp.Header.Get("Location"); loc != "/fortesting" {
+		t.Fatalf("expected redirect to /fortesting, got %q", loc)
+	}
+
+	// Verify that we have a session cookie...
+	var sessionCookie, rememberCookie *http.Cookie
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "session" {
+			sessionCookie = cookie
+		} else if cookie.Name == rememberUsernameCookieName {
+			rememberCookie = cookie
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("expected session cookie, got %v", resp.Cookies())
+	}
+	if rememberCookie == nil {
+		t.Fatalf("expected %q cookie, got %v", rememberUsernameCookieName, resp.Cookies())
+	}
+
+	// Fetching the login page again should result in the username being
+	// pre-filled in the form.
+	resp = client.Get(server.URL + "/login")
+	assertStatus(t, resp, http.StatusOK)
+
+	// Read the body so we can fetch the CSRF token and still parse it.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read body: %v", err)
+	}
+	csrfToken = extractCSRFToken(t, body)
+
+	page, err := html.Parse(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to parse HTML: %v", err)
+	}
+
+	var username string
+	var processNode func(*html.Node)
+	processNode = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "input" {
+			for _, attr := range n.Attr {
+				if attr.Key == "name" && attr.Val == "username" {
+					for _, attr := range n.Attr {
+						if attr.Key == "value" {
+							username = attr.Val
+							return
+						}
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			processNode(c)
+		}
+	}
+	processNode(page)
+
+	if username != "andrew@du.nham.ca" {
+		t.Fatalf("got username %q, want %q", username, "andrew@du.nham.ca")
+	}
+
+	// Logging out should remove the remember_username cookie.
+	resp = client.Post(server.URL+"/account/logout", "application/x-www-form-urlencoded", nil,
+		withCookie(sessionCookie), withCSRFToken(csrfToken))
+	assertStatus(t, resp, http.StatusSeeOther)
+	if loc := resp.Header.Get("Location"); loc != "/login" {
+		t.Fatalf("expected redirect to /login, got %q", loc)
+	}
+
+	// Verify that the remember_username cookie is gone.
+	resp = client.Get(server.URL + "/login")
+	assertStatus(t, resp, http.StatusOK)
+
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == rememberUsernameCookieName {
+			t.Fatalf("expected no %q cookie, got %v", rememberUsernameCookieName, resp.Cookies())
+		}
+	}
+
+	// Verify that the page no longer has the username pre-filled.
+	page, err = html.Parse(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to parse HTML: %v", err)
+	}
+	processNode(page)
+
+	if username != "" {
+		t.Fatalf("got username %q, want empty", username)
+	}
+}
+
+func TestLoginRememberMe_DifferentUser(t *testing.T) {
+	idp, server := newTestServer(t)
+	client := getTestClient(t, server)
+
+	// Create two fake users.
+	if err := idp.db.Write(func(d *data) error {
+		d.Users["test-user"].PasswordHash = makeInsecureWeakPassword(t, "hunter2")
+
+		d.Users["other-user"] = &db.User{
+			UUID:         "other-user",
+			Email:        "foo@example.com",
+			PasswordHash: makeInsecureWeakPassword(t, "hunter3"),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Log in as first user, with "remember" on.
+	resp := client.Get(server.URL + "/login")
+	assertStatus(t, resp, http.StatusOK)
+	csrfToken := extractCSRFTokenFromResponse(t, resp)
+
+	form := url.Values{
+		"username": {"andrew@du.nham.ca"},
+		"password": {"hunter2"},
+		"via":      {"password"},
+		"remember": {"on"},
+	}
+	resp = client.PostForm(server.URL+"/login?next=/fortesting", form, withCSRFToken(csrfToken))
+	assertStatus(t, resp, http.StatusSeeOther)
+	if loc := resp.Header.Get("Location"); loc != "/fortesting" {
+		t.Fatalf("expected redirect to /fortesting, got %q", loc)
+	}
+
+	// Now, log in as the second user, but with no "remember" set.
+	resp = client.Get(server.URL + "/login")
+	assertStatus(t, resp, http.StatusOK)
+	csrfToken = extractCSRFTokenFromResponse(t, resp)
+
+	form = url.Values{
+		"username": {"foo@example.com"},
+		"password": {"hunter3"},
+		"via":      {"password"},
+	}
+	resp = client.PostForm(server.URL+"/login?next=/fortesting", form, withCSRFToken(csrfToken))
+	assertStatus(t, resp, http.StatusSeeOther)
+	if loc := resp.Header.Get("Location"); loc != "/fortesting" {
+		t.Fatalf("expected redirect to /fortesting, got %q", loc)
+	}
+
+	// Verify that we should *not* have a remember_username cookie for the
+	// login page; it should be empty because another user logged in.
+	cookies := client.client.Jar.Cookies(must.Get(url.Parse(server.URL + "/login")))
+	for _, cookie := range cookies {
+		if cookie.Name == rememberUsernameCookieName {
+			t.Fatalf("expected no %q cookie, got %v", rememberUsernameCookieName, cookies)
+		}
+	}
+}
+
+func makeInsecureWeakPassword(t *testing.T, password string) string {
+	// We don't use idp.hasher because it's (intentionally) slow; we
+	// instead create an intentionally VERY WEAK password hash using
+	// parameters just for testing.
+	hasher := pwhash.New(1, 1024, 1)
+	pwhash := hasher.HashString(password)
+	return string(pwhash)
 }
 
 func TestServeAccount(t *testing.T) {
