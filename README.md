@@ -107,3 +107,64 @@ $ ./genpassword password123
 The utility also offers the `-stdin` flag, which will read the password from
 stdin. This can be useful for scripting, or for securely entering a password
 without it being stored in your shell history.
+
+### Using Magic Links
+
+To use magic links to log a user in, you need to configure SMTP credentials in
+the configuration file. For example:
+
+```json
+{
+  "Config": {
+    "CookieDomain": "localhost",
+    "Email": {
+      "FromAddress": "auth@mydomain.com",
+      "SMTPServer": "smtp.example.com",
+      "SMTPUsername": "auth@mydomain.com",
+      "SMTPPassword": "password123",
+      "UseTLS": true
+    }
+  }
+}
+```
+
+If a user clicks "Log In Via Email" on the login page, they will be sent an
+email with a single-use magic link that they can click to log in.
+
+### Using WebAuthn / Passkeys
+
+The easiest method to set up WebAuthn for a user is to configure a user with a
+username/password or magic link, and then log in as that user and add a
+WebAuthn device from the web UI. This can be accomplished at the
+`/account/webauthn` page, where WebAuthn devices can be added.
+
+To remove a WebAuthn device from a user, remove the entry from the JSON file
+under the `WebAuthnCreds` top-level key. Keys inside this object are a user's
+UUID, and values are arrays of WebAuthn credentials:
+
+```jsonc
+{
+  "Users": {
+    "11111111-2222-3333-4444-555555555555": {
+      "UUID": "11111111-2222-3333-4444-555555555555",
+      "Email": "test@example.com"
+    }
+  },
+  "WebAuthnCreds": {
+    "11111111-2222-3333-4444-555555555555": [
+      // first credential
+      {
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+        // ... some fields omitted for clarity ...
+        "UserUUID": "11111111-2222-3333-4444-555555555555",
+        "FriendlyName": "iCloud"
+      }
+
+      // additional credentials here
+      // ...
+    ]
+  }
+  
+  // ... additional Config omitted ...
+}
+```
