@@ -1,8 +1,7 @@
 module github.com/andrew-d/homeauth
 
 go 1.23
-
-toolchain go1.23.0
+toolchain go1.24.1
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
@@ -16,9 +15,9 @@ require (
 	github.com/jordan-wright/email v4.0.1-0.20210109023952-943e75fe5223+incompatible
 	github.com/neilotoole/slogt v1.1.0
 	github.com/spf13/pflag v1.0.5
-	golang.org/x/crypto v0.32.0
+	golang.org/x/crypto v0.36.0
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0
-	golang.org/x/net v0.33.0
+	golang.org/x/net v0.38.0
 )
 
 require (
@@ -29,5 +28,5 @@ require (
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
 )
